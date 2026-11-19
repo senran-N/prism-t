@@ -17,7 +17,7 @@ from typing import Sequence
 import numpy as np
 from PIL import Image
 
-from .models import ROOT, ASSET_DIGESTS, create_ort_session, resolve_ort_providers
+from .models import ROOT, ASSET_DIGESTS, create_ort_session, resolve_ort_providers, run_ort_on_pinned_thread
 
 
 _CLIP_MEAN = np.array([0.48145466, 0.4578275, 0.40821073], np.float32)
@@ -78,7 +78,7 @@ class JapaneseSourceOCR:
     def recognize(self, crop: np.ndarray) -> tuple[str, bool]:
         feed = prepare_source_patches(crop, self.budget, self.patch)
         with self._lock:
-            ids = self.session.run(None, feed)[0].reshape(-1).tolist()
+            ids = run_ort_on_pinned_thread(lambda: self.session.run(None, feed))[0].reshape(-1).tolist()
         eos = len(self.characters)
         complete = eos in ids
         if complete:

@@ -9,7 +9,7 @@ import threading
 from scipy.ndimage import distance_transform_edt, maximum, maximum_filter
 from scipy.stats import chi2, fisher_exact
 
-from .models import create_ort_session, lama_model, model_path, resolve_ort_providers
+from .models import create_ort_session, lama_model, model_path, resolve_ort_providers, run_ort_on_pinned_thread
 from .preprocess import otsu_threshold_and_eta, estimate_noise_sigma, estimate_substrate_noise, substrate_squared_distance
 
 _lama_inference_lock = threading.Lock()
@@ -213,8 +213,23 @@ def comic_text_evidence(rgb: np.ndarray) -> tuple[np.ndarray, list[np.ndarray], 
         canvas = np.full((mh, mw, 3), 114, np.uint8)  # checkpoint's training letterbox value
         canvas[:sh, :sw] = cv2.resize(crop, (sw, sh))
         tensor = np.ascontiguousarray(canvas.transpose(2, 0, 1)[None], dtype=np.float32) / np.float32(255.0)
-        with lock:
-            segmentation, detection, blocks = session.run(["seg", "det", "blk"], {"images": tensor})
+        try:
+            with lock:
+                segmentation, detection, blocks = run_ort_on_pinned_thread(
+                    lambda: session.run(["seg", "det", "blk"], {"images": tensor})
+                )
+        except Exception:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            cpu_session, cpu_lock = _comic_detector_for_providers(("CPUExecutionProvider",))
+            with cpu_lock:
+                segmentation, detection, blocks = run_ort_on_pinned_thread(
+                    lambda: cpu_session.run(["seg", "det", "blk"], {"images": tensor})
+                )
         # These are the pinned checkpoint's published operating points, not
         # image-resolution heuristics. Coordinates remain in native pixels.
         scores = blocks[0, :, 4] * np.max(blocks[0, :, 5:], axis=1)
@@ -919,7 +934,7 @@ def _run_lama_tiles(
         return accum, weights
 
     window = _lama_tile_window(th, tw)
-    batch_size = 4 if device == "cuda" else 1
+    batch_size = 2 if device == "cuda" else 1
     cpu_fallback: tuple[object, str] | None = None
 
     def _infer_batch(cur_net, cur_dev: str, img_np: np.ndarray, mask_np: np.ndarray, allow_fp16: bool) -> np.ndarray:
@@ -998,6 +1013,8 @@ def _run_lama_tiles(
                 for idx_b, (y, x) in enumerate(batch_coords):
                     accum[y:y + th, x:x + tw] += pred_np[idx_b] * window[:, :, None]
                     weights[y:y + th, x:x + tw] += window
+        if device == "cuda" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
     return accum, weights
 
 

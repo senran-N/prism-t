@@ -10,7 +10,7 @@ import logging
 import os
 from pathlib import Path
 import threading
-from typing import Sequence
+from typing import Callable, Sequence, TypeVar
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2] / "data" / "models"
@@ -128,6 +128,17 @@ def ort_provider_specs(providers: Sequence[str]) -> list:
         else:
             specs.append(provider)
     return specs
+
+
+_ORT_PINNED_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="prism-ort")
+_T = TypeVar("_T")
+
+
+def run_ort_on_pinned_thread(fn: Callable[[], _T]) -> _T:
+    """Execute ONNX Runtime inference on a single pinned OS thread so CUDAExecutionProvider
+    reuses one PerThreadContext/cublasHandle_t instead of leaking per-thread cuBLAS handles
+    across FastAPI's worker threadpool."""
+    return _ORT_PINNED_EXECUTOR.submit(fn).result()
 
 
 def create_ort_session(model_file: str | Path, providers: Sequence[str] | None = None):
