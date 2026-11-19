@@ -6,7 +6,8 @@ param(
     [string]$Model = "",
     [switch]$NoVision,
     [string]$ReasoningEffort = "",
-    [switch]$VisionAudit
+    [switch]$VisionAudit,
+    [switch]$SkipSourceOCR
 )
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path $PSScriptRoot -Parent
@@ -55,6 +56,9 @@ if (-not [string]::IsNullOrWhiteSpace($ReasoningEffort)) {
 }
 if ($VisionAudit) {
     $env:PRISM_T_LLM_VISION_AUDIT = "true"
+}
+if ($SkipSourceOCR) {
+    $env:PRISM_T_SKIP_SOURCE_OCR = "true"
 }
 if (-not $PrismArguments) { $PrismArguments = @("serve") }
 Push-Location $repoRoot

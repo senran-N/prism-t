@@ -99,4 +99,5 @@ prismtd <command> [flags]
 | `PRISM_T_LLM_TIMEOUT_SECONDS` | `300` | 单次 LLM 流式请求超时时间（秒） |
 | `PRISM_T_LLM_BATCH_SIZE` | `32` | 单次 LLM 请求包含的最大节点数 |
 | `PRISM_T_SOURCE_LINES_PER_REQUEST` | `24` | 密集节点预转录单批最大行数 |
-| `PRISM_T_CONCURRENCY` | `1` | 并发处理页数（目录流式翻译推荐 `2`–`4`） |
+| `PRISM_T_SKIP_SOURCE_OCR` | `false` | 视觉模式下设为 `true` 跳过本地逐行 `source_readings` 识别，显著降低 `DetectLayout` 耗时与显存占用 |
+| `PRISM_T_CONCURRENCY` | `1` | 并发处理页数（目录流式翻译推荐 `4`–`8`） |

@@ -811,7 +811,10 @@ def _compute_layout_state(
                     rx0_m, ry0_m, rw_m, rh_m = m["_roi"]
                     stroke_owners[ry0_m : ry0_m + rh_m, rx0_m : rx0_m + rw_m] += m["_orig_ink_roi"] > 0
 
-    if pre_detected_regions is None and stage1_meta:
+    skip_source_ocr = (not req.recognize_text) and os.environ.get(
+        "PRISM_T_SKIP_SOURCE_OCR", ""
+    ).strip().lower() in ("1", "true", "yes", "on")
+    if pre_detected_regions is None and stage1_meta and not skip_source_ocr:
         has_ja_script = default_vertical or any(
             "\u3040" <= ch <= "\u30ff" for m in stage1_meta for ch in m["source_text"]
         )
