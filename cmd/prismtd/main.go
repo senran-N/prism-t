@@ -226,6 +226,7 @@ func runTranslate(args []string) error {
 	streamMode := fs.Bool("stream", false, "Stream directory pages one-by-one with constant memory and immediate output persistence")
 	resume := fs.Bool("resume", false, "Resume directory translation by skipping pages already completed in DB (implies --stream)")
 	continueOnError := fs.Bool("continue-on-error", false, "Log per-page errors and continue translating remaining pages in stream mode")
+	fs.BoolVar(&cfg.PreserveArtText, "preserve-art-text", cfg.PreserveArtText, "Leave decorative body tattoos, clothing prints, and in-art pattern text untouched to preserve artwork aesthetics")
 	fs.StringVar(&cfg.Device, "device", cfg.Device, "Compute device (auto, cpu, gpu, cuda, dml)")
 	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "Path to SQLite WAL database")
 	fs.StringVar(&cfg.EngineURL, "engine-url", cfg.EngineURL, "Local prism-t-engine URL")

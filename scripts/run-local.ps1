@@ -7,7 +7,8 @@ param(
     [switch]$NoVision,
     [string]$ReasoningEffort = "",
     [switch]$VisionAudit,
-    [switch]$SkipSourceOCR
+    [switch]$SkipSourceOCR,
+    [switch]$PreserveArtText
 )
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path $PSScriptRoot -Parent
@@ -59,6 +60,9 @@ if ($VisionAudit) {
 }
 if ($SkipSourceOCR) {
     $env:PRISM_T_SKIP_SOURCE_OCR = "true"
+}
+if ($PreserveArtText) {
+    $env:PRISM_T_PRESERVE_ART_TEXT = "true"
 }
 if (-not $PrismArguments) { $PrismArguments = @("serve") }
 Push-Location $repoRoot

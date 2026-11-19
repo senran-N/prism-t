@@ -30,6 +30,7 @@ type Config struct {
 	LLMVision              bool
 	LLMSourcePrepass       bool
 	LLMVisionAudit         bool
+	PreserveArtText        bool
 	LLMBatchSize           int
 	LLMSourceLineBatchSize int
 	MaxConcurrency         int
@@ -56,6 +57,7 @@ func Default() Config {
 		LLMVision:              envBool("PRISM_T_LLM_VISION", false),
 		LLMSourcePrepass:       envBool("PRISM_T_LLM_SOURCE_PREPASS", false),
 		LLMVisionAudit:         envBool("PRISM_T_LLM_VISION_AUDIT", false),
+		PreserveArtText:        envBool("PRISM_T_PRESERVE_ART_TEXT", false),
 		LLMBatchSize:           envInt("PRISM_T_LLM_BATCH_SIZE", 32),
 		LLMSourceLineBatchSize: envInt("PRISM_T_SOURCE_LINES_PER_REQUEST", 24),
 		MaxConcurrency:         envInt("PRISM_T_CONCURRENCY", 1),

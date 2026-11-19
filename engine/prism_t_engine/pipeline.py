@@ -1779,6 +1779,14 @@ def _ensure_node_patches_for_render(raw_rgb: np.ndarray, node: TextNode) -> None
     node.patches.render_fingerprint = ""
 
 
+def _is_unchanged_surface_text(node: TextNode) -> bool:
+    if node.bubble_kind not in ("floating_sfx", "diegetic_surface"):
+        return False
+    src = "".join(ch for ch in (node.source_text or "") if not ch.isspace())
+    tgt = "".join(ch for ch in (node.target_text or "") if not ch.isspace())
+    return bool(src and tgt and src.casefold() == tgt.casefold())
+
+
 def typeset_and_render_page(req: RenderRequest) -> RenderResponse:
     t0 = time.perf_counter()
     raw_rgb = decode_image_b64(req.raw_image_png_b64, mode="RGB")
@@ -1803,6 +1811,8 @@ def typeset_and_render_page(req: RenderRequest) -> RenderResponse:
     foreground = np.zeros((H, W), dtype=bool)
     decoded_inputs: list[tuple[TextNode, int, int, int, int, np.ndarray, np.ndarray, np.ndarray | None]] = []
     for node in dom.nodes:
+        if _is_unchanged_surface_text(node):
+            continue
         rx0, ry0, rw, rh = node.patches.roi
         if rw <= 0 or rh <= 0 or not node.patches.clean_z0_png_b64:
             continue

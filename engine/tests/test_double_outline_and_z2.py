@@ -149,3 +149,32 @@ def test_enclosed_solid_heart_symbol_not_dropped_by_stroke_growth_bound():
     cv2.circle(heart_mask.view(np.uint8), (50, 110), 10, 1, -1)
     heart_recall = float(np.count_nonzero((alpha > 0) & heart_mask)) / float(np.count_nonzero(heart_mask))
     assert heart_recall >= 0.95, f"solid enclosed heart core was dropped: recall={heart_recall:.3f}"
+
+
+def test_unchanged_surface_text_skips_erasure_and_preserves_raw_pixels():
+    from prism_t_engine.codec import decode_image_b64, encode_png_b64
+    from prism_t_engine.pipeline import typeset_and_render_page
+    from prism_t_engine.schemas import PageDOM, PatchLayers, RenderRequest, StyleSpec, TextNode
+
+    raw = np.full((80, 120, 3), [220, 180, 165], dtype=np.uint8)
+    cv2.putText(raw, "01", (35, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (25, 18, 12), 2)
+    clean_z0 = np.full((80, 120, 3), [220, 180, 165], dtype=np.uint8)
+    stroke_alpha = np.full((80, 120), 255, dtype=np.uint8)
+    node = TextNode(
+        id="n_body",
+        bbox=[20, 15, 80, 50],
+        bubble_kind="floating_sfx",
+        source_text="SEX DOLL\n01",
+        target_text="SEX DOLL01",
+        style=StyleSpec(orientation="horizontal", source_font_size_px=24.0),
+        patches=PatchLayers(
+            roi=[0, 0, 120, 80],
+            clean_z0_png_b64=encode_png_b64(clean_z0),
+            stroke_alpha_png_b64=encode_png_b64(stroke_alpha),
+        ),
+    )
+    resp = typeset_and_render_page(
+        RenderRequest(raw_image_png_b64=encode_png_b64(raw), dom=PageDOM(width=120, height=80, nodes=[node]))
+    )
+    comp = decode_image_b64(resp.composite_png_b64, mode="RGB")
+    assert np.array_equal(comp, raw), "unchanged surface label must remain bit-exact untouched"

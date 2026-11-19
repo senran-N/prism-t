@@ -457,3 +457,72 @@ func TestReasoningEffortDefaultAndUnsupportedFallback(t *testing.T) {
 		t.Fatalf("expected third call to omit reasoning_effort proactively, got %v", seenEfforts)
 	}
 }
+
+func TestUnchangedSurfaceTextPreservesOriginalArtwork(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "surface.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	work, err := st.EnsureWork(context.Background(), "Surface Work", "ja", "zh-CN", "manga_rtl")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	isWriting := true
+	backend := &responseBackend{responses: [][]NodeTranslationResult{
+		{
+			{ID: "body_label", IsText: &isWriting, SourceText: "SEX DOLL\n01", TargetText: "SEX DOLL01", TargetSegments: []string{"SEX DOLL01"}},
+			{ID: "dialogue", IsText: &isWriting, SourceText: "おはよう", TargetText: "早上好", TargetSegments: []string{"早上好"}},
+		},
+	}}
+	compiler := NewCompilerWithBackend(config.Config{LLMVision: true, LLMBatchSize: 16}, backend)
+	page := dom.PageDOM{Nodes: []dom.TextNode{
+		{ID: "body_label", BubbleKind: "floating_sfx", RecognitionPending: true, BBox: []int{0, 0, 2, 2}},
+		{ID: "dialogue", BubbleKind: "floating_sfx", RecognitionPending: true, BBox: []int{0, 0, 2, 2}},
+	}}
+	var raw bytes.Buffer
+	if err := png.Encode(&raw, image.NewGray(image.Rect(0, 0, 2, 2))); err != nil {
+		t.Fatal(err)
+	}
+	if err := compiler.CompilePageTranslations(context.Background(), st, work.ID, "Chapter 1", 0, "zh-CN", &page, raw.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Nodes) != 1 || page.Nodes[0].ID != "dialogue" {
+		t.Fatalf("expected unchanged body label skipped, got nodes=%+v", page.Nodes)
+	}
+	if len(page.RejectedRegions) != 1 || page.RejectedRegions[0].ID != "body_label" || page.RejectedRegions[0].Reason != "unchanged_surface_text" {
+		t.Fatalf("expected body_label recorded in RejectedRegions as unchanged_surface_text, got %+v", page.RejectedRegions)
+	}
+}
+
+func TestPreserveArtTextInjectsDecorativeArtworkRule(t *testing.T) {
+	var seenSystem string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		msgs := body["messages"].([]any)
+		seenSystem = msgs[0].(map[string]any)["content"].(string)
+		writeChatStream(w, `{"translations":{"t1":{"id":"t1","is_text":false,"source_text":"","target_segments":[],"reason":"decorative_body_art","rubies":[]}}}`)
+	}))
+	defer server.Close()
+
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	cfg.LLMBaseURL = server.URL
+	cfg.LLMVision = true
+	cfg.PreserveArtText = true
+	backend := NewOpenAICompatibleBackend(cfg)
+	results, err := backend.TranslateNodes(context.Background(), "zh-CN", nil, nil, []NodeTranslationRequest{{ID: "t1", BBox: []int{0, 0, 2, 2}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(seenSystem, "preserve_art_text") || !strings.Contains(seenSystem, "decorative_body_art") {
+		t.Fatalf("expected preserve_art_text rule in system prompt, got: %s", seenSystem)
+	}
+	if len(results) != 1 || results[0].IsText == nil || *results[0].IsText || results[0].Reason != "decorative_body_art" {
+		t.Fatalf("unexpected decorative_body_art result: %+v", results)
+	}
+}

@@ -51,6 +51,7 @@ prismtd <command> [flags]
 | `--stream` | `false` | 目录流式逐页翻译，恒定内存并逐页立即原子写盘 |
 | `--resume` | `false` | 断点续译（自动启用 `--stream`）：跳过库中已译页，缺失输出文件直接从库回补 |
 | `--continue-on-error` | `false` | 流式模式下单页失败不中断整批，记录失败明细至 `<out>/_failed_pages.jsonl` |
+| `--preserve-art-text` | `false` | 视觉翻译时保留人物皮肤纹身、服饰印花、半透明印章等装饰性图案文字不擦除不重绘，保护画面美感 |
 | `--device` | `auto` | 计算设备（`auto`、`cpu`、`gpu`、`cuda`、`dml`） |
 | `--db` / `--engine-url` / `--engine-dir` / `--llm-url` / `--llm-model` | 同环境变量 | 覆盖默认路径与后端配置 |
 
@@ -93,6 +94,7 @@ prismtd <command> [flags]
 | `PRISM_T_LLM_API_KEY` | `""` | LLM API 密钥 |
 | `PRISM_T_LLM_MODEL` | `gpt-4o-mini` | LLM 模型名称 |
 | `PRISM_T_LLM_VISION` | `false` | 设为 `true` 启用整页+节点图集视觉翻译模式 |
+| `PRISM_T_PRESERVE_ART_TEXT` | `false` | 设为 `true` 保留人物身体纹身/服饰印花/半透明印章等装饰性图案文字原画不改动 |
 | `PRISM_T_LLM_REASONING_EFFORT` | `none` | 推理档位（如 `none`、`low`、`medium`、`high`、`auto`） |
 | `PRISM_T_LLM_VISION_AUDIT` | `false` | 设为 `true` 启用整页第二遍视觉语义复核 |
 | `PRISM_T_LLM_SOURCE_PREPASS` | `false` | 设为 `true` 启用独立的纯源文预转录通道 |

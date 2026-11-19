@@ -455,9 +455,10 @@ func (c *Compiler) CompilePageTranslations(
 		Language, Endpoint, Model string
 		ReasoningEffort           string
 		Vision                    bool
+		PreserveArtText           bool
 		Image                     [32]byte
 		Implementation            [4][32]byte
-	}{requests, priorTurns, matchedGlossary, targetLang, c.cfg.LLMBaseURL, c.cfg.LLMModel, c.cfg.LLMReasoningEffort, c.cfg.LLMVision, sha256.Sum256(rawPNG), [4][32]byte{sha256.Sum256(compilerImplementation), sha256.Sum256(fidelityImplementation), sha256.Sum256(transcriptionImplementation), sha256.Sum256(visionImplementation)}})
+	}{requests, priorTurns, matchedGlossary, targetLang, c.cfg.LLMBaseURL, c.cfg.LLMModel, c.cfg.LLMReasoningEffort, c.cfg.LLMVision, c.cfg.PreserveArtText, sha256.Sum256(rawPNG), [4][32]byte{sha256.Sum256(compilerImplementation), sha256.Sum256(fidelityImplementation), sha256.Sum256(transcriptionImplementation), sha256.Sum256(visionImplementation)}})
 	if err != nil {
 		return err
 	}
@@ -538,6 +539,12 @@ func (c *Compiler) CompilePageTranslations(
 			}
 			n.TargetText = strings.TrimSpace(res.TargetText)
 			n.TargetSegments = res.TargetSegments
+			// Never erase and re-render floating/diegetic markings (e.g. curved body labels
+			// like "SEX DOLL 01") when translation leaves the text identical to the original.
+			if isUnchangedSurfaceText(n.BubbleKind, n.SourceText, n.TargetText) {
+				pageDOM.RejectedRegions = append(pageDOM.RejectedRegions, dom.RejectedRegion{ID: n.ID, BBox: n.BBox, Reason: "unchanged_surface_text", SourceLines: n.SourceLines, SourceQuadrilaterals: n.SourceQuadrilaterals, SourceReadings: n.SourceReadings})
+				continue
+			}
 			n.TargetRubyPairs = alignTargetRubies(n.TargetText, res.Rubies)
 			if n.CharBudgetMax > 0 && utf8.RuneCountInString(n.TargetText) > n.CharBudgetMax {
 				n.Uncertainty.NeedsReview = true
@@ -908,6 +915,7 @@ type OpenAICompatibleBackend struct {
 	apiKey               string
 	model                string
 	reasoningEffort      string
+	preserveArtText      bool
 	reasoningUnsupported atomic.Bool
 	httpClient           *http.Client
 }
@@ -919,6 +927,7 @@ func NewOpenAICompatibleBackend(cfg config.Config) *OpenAICompatibleBackend {
 		apiKey:          strings.TrimSpace(cfg.LLMAPIKey),
 		model:           strings.TrimSpace(cfg.LLMModel),
 		reasoningEffort: config.NormalizeReasoningEffort(cfg.LLMReasoningEffort),
+		preserveArtText: cfg.PreserveArtText,
 		httpClient: &http.Client{
 			Timeout: cfg.LLMRequestTimeout,
 		},
@@ -989,7 +998,11 @@ func (b *OpenAICompatibleBackend) TranslateNodes(
 	sb.WriteString("9. Preserve all meaning, negation, uncertainty, character intent, and emotional tone. A character budget is a layout preference, never permission to delete meaning. Prefer a faithful complete translation when no faithful compression fits.\n")
 	if hasDraftOrAudit {
 		sb.WriteString("10. If draft_translation is supplied, audit it against the actual image independently. For unlocked nodes verify each source glyph and line. Check every proposition, agent/patient/beneficiary direction, ally-vs-enemy stance, ownership, qualification, cross-node split-clause grammar, and character register against the draft and scene. Fix flipped roles, dangling split-clause fragments, literal source-kanji calques, stiff translationese, and wrong sentence-final punctuation. Return source_text and the full corrected translation as target_segments in the same JSON contract. Treat the draft as fallible evidence; do not approve it merely because it reads fluently.\n")
-		sb.WriteString("11. Also audit draft_is_text:false decisions against the image. Any readable writing counts as text: dialogue, narration, sound effects, titles, marginal notes, package labels, signs and numbers. Never reject writing because it is not dialogue, is difficult to read, or was previously rejected. Return is_text:false only for a region with no actual writing and give a visual reason.\n")
+		if b.preserveArtText {
+			sb.WriteString("11. Also audit draft_is_text:false decisions against the image. Dialogue, narration, sound effects, titles, and marginal notes must always be translated, while decorative body tattoos, skin stamps, clothing prints, and translucent status-stamp overlays integrated into character artwork should remain is_text:false with reason 'decorative_body_art'.\n")
+		} else {
+			sb.WriteString("11. Also audit draft_is_text:false decisions against the image. Any readable writing counts as text: dialogue, narration, sound effects, titles, marginal notes, package labels, signs and numbers. Never reject writing because it is not dialogue, is difficult to read, or was previously rejected. Return is_text:false only for a region with no actual writing and give a visual reason.\n")
+		}
 	}
 	sb.WriteString("12. source_lines and source_quadrilaterals define this node's owned writing. bbox includes context and padding: do not copy adjacent titles, captions, or other nodes merely because their text is visible in the crop. Preserve line order and transcribe only the supplied node's own writing.\n")
 	sb.WriteString("Independent source_readings are local recognizer observations for zero-based source line_index, not translations or an answer key. Read their corresponding line images and resolve disagreements from the actual glyph shapes. Scores are recognizer-specific and cannot be compared across models. Do not silently adopt a fluent guess, normalize visible source characters into a more likely expression, add laughter or explanatory text absent from the writing, or copy a draft over contradictory image evidence. Empty readings do not mean the region is not text.\n")
@@ -1007,6 +1020,9 @@ func (b *OpenAICompatibleBackend) TranslateNodes(
 	sb.WriteString("\n16. Idiomatic Localization & Register: Translate into natural, vivid target-language prose matching the speaker's persona and register (e.g., haughty archaic antagonist, solemn prayer, urgent battle command, casual banter) rather than stiff word-for-word calques. Translate split sentences across consecutive `reading_order` nodes so the joined result is grammatically complete. Match closing punctuation to actual illocutionary force (use question marks for genuine questions rather than periods).")
 	if isChineseTargetLang(targetLang) {
 		sb.WriteString(" For Chinese targets (`zh*`), localize source-language kanji compounds, place-name morphemes, directional enumerations, and idioms into idiomatic Chinese rather than copying untranslated Japanese kanji verbatim, never leave untranslated Japanese kana (such as `っ`/`ッ`) inside Chinese text, avoid awkward Westernized/translationese syntax, and format all ellipses consistently as standard six-dot `……` rather than single `…` or triple `………`.")
+	}
+	if b.preserveArtText {
+		sb.WriteString("\n17. Decorative Character/Body Artwork Preservation (`preserve_art_text` enabled): Do NOT translate decorative markings, tattoos, serial numbers, logos, clothing prints, armor engravings, or translucent glowing status-stamp overlays drawn directly onto a character's skin, body, outfit, or accessories (e.g., curved body prints like `SEX DOLL 01`, skin tattoos, T-shirt text, semi-transparent head stamps) unless they are actual spoken dialogue, narration, or manga sound effects. For such decorative in-art markings, return `is_text: false`, `target_segments: []`, and `reason: \"decorative_body_art\"` so the original illustration pixels stay completely untouched.")
 	}
 	if hasDraftOrAudit {
 		sb.WriteString(" On audit, independently check these referents, agent/patient roles, and natural phrasing against the source and image, including split clauses in neighboring nodes.")
@@ -1599,4 +1615,32 @@ func extractJSONObject(content string) string {
 		}
 	}
 	return s[openIdx:]
+}
+
+func compactTextNoSpace(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// isUnchangedSurfaceText reports whether a borderless/diegetic marking (e.g. a
+// curved body print like "SEX DOLL 01") remained verbatim identical after
+// translation (ignoring whitespace/newlines and ASCII letter case). Erasing and
+// re-rendering identical text destroys the original curved artwork for zero gain.
+func isUnchangedSurfaceText(bubbleKind, sourceText, targetText string) bool {
+	if bubbleKind != "floating_sfx" && bubbleKind != "diegetic_surface" {
+		return false
+	}
+	src := compactTextNoSpace(sourceText)
+	tgt := compactTextNoSpace(targetText)
+	if src == "" || tgt == "" {
+		return false
+	}
+	return strings.EqualFold(src, tgt)
 }
