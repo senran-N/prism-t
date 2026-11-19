@@ -1,0 +1,45 @@
+# Binaries
+/prismtd
+/prismtd.exe
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Runtime data & local secrets
+data/
+artifacts/
+.env
+.env.*
+*.db
+*.db-shm
+*.db-wal
+*.key
+*.log
+_failed_pages.jsonl
+
+# Internal developer notes (never commit to public repository)
+AGENTS.md
+WORK_LOG.md
+.internal/
+smoke/
+
+# Python virtual environment & caches
+engine/.venv/
+engine/__pycache__/
+engine/**/__pycache__/
+engine/.pytest_cache/
+*.pyc
+**/.pytest_cache/
+
+# Frontend dependencies & build artifacts
+web/node_modules/
+web/dist/
+*.tsbuildinfo
+
+# Local test/export outputs
+engine/.runtime_cpu*/
+*.psd
+*.cbz
+.DS_Store
+Thumbs.db
