@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image
 from scipy.interpolate import UnivariateSpline
 from .preprocess import estimate_noise_sigma, estimate_substrate_noise, substrate_squared_distance, otsu_threshold_and_eta
-from .restoration import solve_laplace_dirichlet
+from .restoration import solve_laplace_dirichlet_fast
 from scipy.stats import chi2
 from .segmentation import separate_kanji_ruby_components
 from .schemas import RubyPair
@@ -341,7 +341,7 @@ def observed_background_contrast(rgb: np.ndarray, known: np.ndarray) -> np.ndarr
     Harmonic extension supplies a value throughout the unknown domain.
     This is segmentation evidence only; it never writes the clean plate.
     """
-    background = solve_laplace_dirichlet(rgb,~known)
+    background = solve_laplace_dirichlet_fast(rgb,~known)
     sigma = estimate_substrate_noise(rgb,known)
     return np.sqrt(substrate_squared_distance(rgb,background,sigma))
 from .models import create_ort_session, inference_threads, resolve_ort_providers

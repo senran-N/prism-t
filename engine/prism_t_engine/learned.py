@@ -425,8 +425,8 @@ def refine_text_alpha(rgb: np.ndarray, probability: np.ndarray, seed: np.ndarray
             observed_selected = observed
         else:
             if np.any(~domain):
-                from .restoration import solve_laplace_dirichlet
-                background = solve_laplace_dirichlet(rgb, domain)
+                from .restoration import solve_laplace_dirichlet_fast
+                background = solve_laplace_dirichlet_fast(rgb, domain)
                 uncertainty = estimate_substrate_noise(rgb, ~domain)
                 delta = (rgb.astype(float) - background) / uncertainty
                 contrast = np.sum(delta * delta, axis=2)
@@ -529,8 +529,8 @@ def refine_text_alpha(rgb: np.ndarray, probability: np.ndarray, seed: np.ndarray
                 edge_delta = delta
                 edge_contrast = contrast
             else:
-                from .restoration import solve_laplace_dirichlet
-                edge_background = solve_laplace_dirichlet(rgb, candidates)
+                from .restoration import solve_laplace_dirichlet_fast
+                edge_background = solve_laplace_dirichlet_fast(rgb, candidates)
                 edge_noise = estimate_substrate_noise(rgb, ~candidates)
                 edge_delta = (rgb.astype(float) - edge_background) / edge_noise
                 edge_contrast = np.sum(edge_delta ** 2, axis=2)
@@ -652,9 +652,9 @@ def _recover_outer_outline_shell(
     if not rim_band.any() or int(np.count_nonzero(~rim_hull)) < 16:
         return strong_attached
 
-    from .restoration import solve_laplace_dirichlet
+    from .restoration import solve_laplace_dirichlet_fast
 
-    shell_bg = solve_laplace_dirichlet(rgb, rim_hull)
+    shell_bg = solve_laplace_dirichlet_fast(rgb, rim_hull)
     shell_noise = estimate_substrate_noise(rgb, ~rim_hull)
     rgb_f = rgb.astype(np.float64)
     shell_delta = (rgb_f - shell_bg) / shell_noise
