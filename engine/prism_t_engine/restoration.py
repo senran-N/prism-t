@@ -1132,6 +1132,17 @@ def restore_clean_plate_roi(
     if not np.any(known):
         known = ~unknown
     if not np.any(known):
+        # When overlapping sibling context_exclusion masks cover 100% of a tight ROI,
+        # full-page precomputed LaMa still saw real exterior context outside the ROI.
+        if precomputed_lama_roi is not None and precomputed_lama_roi.shape == roi_rgb.shape:
+            bg = np.clip(np.rint(precomputed_lama_roi), 0, 255).astype(np.uint8)
+            out = roi_rgb.copy()
+            out[active] = bg[active]
+            return out, "lama_masked", 0.0, bg
+        if context_exclusion is not None and np.any(~active):
+            unknown = active
+            known = ~active
+    if not np.any(known):
         raise ValueError("clean-plate reconstruction has no observable background pixels")
 
     ring = validation_collar(active, known)
