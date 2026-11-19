@@ -539,8 +539,8 @@ func (c *Compiler) CompilePageTranslations(
 			}
 			n.TargetText = strings.TrimSpace(res.TargetText)
 			n.TargetSegments = res.TargetSegments
-			// Never erase and re-render floating/diegetic markings (e.g. curved body labels
-			// like "SEX DOLL 01") when translation leaves the text identical to the original.
+			// Never erase and re-render floating/diegetic markings (e.g. curved garment
+			// prints or serial labels like "UNIT 01") when translation leaves the text identical.
 			if isUnchangedSurfaceText(n.BubbleKind, n.SourceText, n.TargetText) {
 				pageDOM.RejectedRegions = append(pageDOM.RejectedRegions, dom.RejectedRegion{ID: n.ID, BBox: n.BBox, Reason: "unchanged_surface_text", SourceLines: n.SourceLines, SourceQuadrilaterals: n.SourceQuadrilaterals, SourceReadings: n.SourceReadings})
 				continue
@@ -1022,7 +1022,7 @@ func (b *OpenAICompatibleBackend) TranslateNodes(
 		sb.WriteString(" For Chinese targets (`zh*`), localize source-language kanji compounds, place-name morphemes, directional enumerations, and idioms into idiomatic Chinese rather than copying untranslated Japanese kanji verbatim, never leave untranslated Japanese kana (such as `っ`/`ッ`) inside Chinese text, avoid awkward Westernized/translationese syntax, and format all ellipses consistently as standard six-dot `……` rather than single `…` or triple `………`.")
 	}
 	if b.preserveArtText {
-		sb.WriteString("\n17. Decorative Character/Body Artwork Preservation (`preserve_art_text` enabled): Do NOT translate decorative markings, tattoos, serial numbers, logos, clothing prints, armor engravings, or translucent glowing status-stamp overlays drawn directly onto a character's skin, body, outfit, or accessories (e.g., curved body prints like `SEX DOLL 01`, skin tattoos, T-shirt text, semi-transparent head stamps) unless they are actual spoken dialogue, narration, or manga sound effects. For such decorative in-art markings, return `is_text: false`, `target_segments: []`, and `reason: \"decorative_body_art\"` so the original illustration pixels stay completely untouched.")
+		sb.WriteString("\n17. Decorative Character/Body Artwork Preservation (`preserve_art_text` enabled): Do NOT translate decorative markings, tattoos, serial numbers, logos, clothing prints, armor engravings, or translucent glowing status-stamp overlays drawn directly onto a character's skin, body, outfit, or accessories (e.g., curved garment prints, jersey/unit serials, skin tattoos, T-shirt logos, semi-transparent decorative stamps) unless they are actual spoken dialogue, narration, or manga sound effects. For such decorative in-art markings, return `is_text: false`, `target_segments: []`, and `reason: \"decorative_body_art\"` so the original illustration pixels stay completely untouched.")
 	}
 	if hasDraftOrAudit {
 		sb.WriteString(" On audit, independently check these referents, agent/patient roles, and natural phrasing against the source and image, including split clauses in neighboring nodes.")
@@ -1630,7 +1630,7 @@ func compactTextNoSpace(s string) string {
 }
 
 // isUnchangedSurfaceText reports whether a borderless/diegetic marking (e.g. a
-// curved body print like "SEX DOLL 01") remained verbatim identical after
+// curved garment print or serial label like "UNIT 01") remained verbatim identical after
 // translation (ignoring whitespace/newlines and ASCII letter case). Erasing and
 // re-rendering identical text destroys the original curved artwork for zero gain.
 func isUnchangedSurfaceText(bubbleKind, sourceText, targetText string) bool {

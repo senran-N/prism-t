@@ -472,7 +472,7 @@ func TestUnchangedSurfaceTextPreservesOriginalArtwork(t *testing.T) {
 	isWriting := true
 	backend := &responseBackend{responses: [][]NodeTranslationResult{
 		{
-			{ID: "body_label", IsText: &isWriting, SourceText: "SEX DOLL\n01", TargetText: "SEX DOLL01", TargetSegments: []string{"SEX DOLL01"}},
+			{ID: "body_label", IsText: &isWriting, SourceText: "UNIT\n01", TargetText: "UNIT01", TargetSegments: []string{"UNIT01"}},
 			{ID: "dialogue", IsText: &isWriting, SourceText: "おはよう", TargetText: "早上好", TargetSegments: []string{"早上好"}},
 		},
 	}}

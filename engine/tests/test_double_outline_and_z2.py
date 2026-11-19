@@ -164,8 +164,8 @@ def test_unchanged_surface_text_skips_erasure_and_preserves_raw_pixels():
         id="n_body",
         bbox=[20, 15, 80, 50],
         bubble_kind="floating_sfx",
-        source_text="SEX DOLL\n01",
-        target_text="SEX DOLL01",
+        source_text="UNIT\n01",
+        target_text="UNIT01",
         style=StyleSpec(orientation="horizontal", source_font_size_px=24.0),
         patches=PatchLayers(
             roi=[0, 0, 120, 80],
