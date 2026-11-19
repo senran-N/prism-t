@@ -1111,20 +1111,36 @@ def _restore_from_state(
         )
 
         source_ink = coarse_roi > 0
+        style_ink = source_ink
+        if (not enclosed) and text_probability is not None:
+            cand_style_ink = (eff_alpha > 0.1) & (z2_mask == 0)
+            if int(np.count_nonzero(cand_style_ink)) >= 16 and np.any(~cand_style_ink):
+                style_ink = cand_style_ink
         source_radii = distance_transform_edt(source_ink)[source_ink]
         source_width = float(2 * np.median(source_radii)) if source_radii.size else 0.0
         source_modulation = float(np.median(np.abs(2 * source_radii - source_width)) / source_width) if source_radii.size else 0.0
+        foreign_owners = stroke_owners[ry0 : ry0 + rh, rx0 : rx0 + rw] > orig_ink_roi
         typography_substrate = (stroke_owners[ry0 : ry0 + rh, rx0 : rx0 + rw] == 0) & (text_domain == 0) & (z2_mask == 0)
         if enclosed and bmask_sub is not None:
-            typography_substrate &= bmask_sub > 0
+            cand_sub = typography_substrate & (bmask_sub > 0)
+            if np.any(cand_sub & (~style_ink)):
+                typography_substrate = cand_sub
+        if not np.any(typography_substrate & (~style_ink)):
+            relaxed = (~style_ink) & (~foreign_owners) & (z2_mask == 0)
+            if enclosed and bmask_sub is not None and np.any(relaxed & (bmask_sub > 0)):
+                typography_substrate = relaxed & (bmask_sub > 0)
+            elif np.any(relaxed):
+                typography_substrate = relaxed
+            else:
+                typography_substrate = ~style_ink
         style_spec, fusion_mode, exemplar = extract_stroke_style_and_halo(
             roi_rgb=roi_rgb,
-            stroke_alpha=source_ink.astype(np.float32),
+            stroke_alpha=style_ink.astype(np.float32),
             stroke_w=source_width,
             stroke_mod=source_modulation,
             orientation=reg["orientation"],
             bubble_kind=m["bubble_kind"],
-            pigment_support=source_ink,
+            pigment_support=style_ink,
             substrate_support=typography_substrate,
         )
         if is_semi and ref_crop is None:
@@ -1502,6 +1518,14 @@ def _harmonize_style_list(entries: list[tuple[str, StyleSpec]]) -> None:
                 st.outline_width_px = med_ow
                 if med_oc is not None:
                     st.outline_color_rgba = list(med_oc)
+            outer_sibs = [st for st in sibling_grp if float(getattr(st, "outer_outline_width_px", 0.0) or 0.0) >= 0.75]
+            if outer_sibs:
+                med_ow2 = float(np.median([float(st.outer_outline_width_px) for st in outer_sibs]))
+                o_arr = np.array([st.outer_outline_color_rgba[:4] for st in outer_sibs], dtype=np.float32)
+                med_oc2 = [int(round(v)) for v in np.median(o_arr, axis=0)]
+                for st in sibling_grp:
+                    st.outer_outline_width_px = med_ow2
+                    st.outer_outline_color_rgba = list(med_oc2)
 
 
 def harmonize_page_typography(ordered_meta: list[dict]) -> None:
@@ -1614,8 +1638,11 @@ def _render_node_ink(node: TextNode, clean_z0: np.ndarray, stroke_alpha: np.ndar
     # by the chosen font size just as the layout's clearance calculation does.
     # Keep source style in the DOM so cached/edited renders do not scale twice.
     if render_style.source_font_size_px > 0:
-        render_style = render_style.model_copy(update={"outline_width_px":
-            render_style.outline_width_px*layout.font_size/render_style.source_font_size_px})
+        fs_ratio = layout.font_size / render_style.source_font_size_px
+        render_style = render_style.model_copy(update={
+            "outline_width_px": render_style.outline_width_px * fs_ratio,
+            "outer_outline_width_px": float(getattr(render_style, "outer_outline_width_px", 0.0) or 0.0) * fs_ratio,
+        })
     z1_rgba = apply_exemplar_stroke_shader(
         glyph_alpha=comp_alpha,
         exemplar_patch=exemplar if node.fusion_mode == "exemplar_stroke" else None,

@@ -1257,16 +1257,48 @@ def detect_and_recognize_page_regions(
             bw, bh = bx1 - bx0, by1 - by0
             if (ah > aw) != (bh > bw):
                 continue
-            char_s = max(scales[i], scales[j])
+            s_lo = min(scales[i], scales[j])
+            s_hi = max(scales[i], scales[j])
             gap_x = max(0.0, max(ax0, bx0) - min(ax1, bx1))
             gap_y = max(0.0, max(ay0, by0) - min(ay1, by1))
             overlap_y = max(0.0, min(ay1, by1) - max(ay0, by0)) / max(1.0, min(ah, bh))
             overlap_x = max(0.0, min(ax1, bx1) - max(ax0, bx0)) / max(1.0, min(aw, bw))
 
-            close_columns = (gap_x <= 1.45 * char_s) and (overlap_y >= 0.25)
-            close_rows = (gap_y <= 1.20 * char_s) and (overlap_x >= 0.25)
+            # Use the smaller line scale to prevent an oversized false/square box from
+            # reaching across wide empty gaps to swallow real text columns, while still
+            # permitting tight furigana/ruby immediately adjacent to a main column.
+            adj_ruby = (s_hi / max(s_lo, 1.0) > 1.8) and (
+                (gap_x <= 0.55 * s_hi and overlap_y >= 0.35)
+                or (gap_y <= 0.55 * s_hi and overlap_x >= 0.35)
+            )
+            char_s = s_hi if (s_hi <= 1.8 * max(s_lo, 1.0)) else s_lo
+            close_columns = ((gap_x <= 1.45 * char_s) and (overlap_y >= 0.25)) or (
+                adj_ruby and gap_x <= 0.55 * s_hi and overlap_y >= 0.35
+            )
+            close_rows = ((gap_y <= 1.20 * char_s) and (overlap_x >= 0.25)) or (
+                adj_ruby and gap_y <= 0.55 * s_hi and overlap_x >= 0.35
+            )
             if not (close_columns or close_rows):
                 continue
+
+            # Never bridge two lines across an intervening line owned by a different block.
+            intervened = False
+            if close_columns and max(ax0, bx0) > min(ax1, bx1):
+                mx_lo, mx_hi = min(ax1, bx1), max(ax0, bx0)
+                my_lo, my_hi = max(ay0, by0), min(ay1, by1)
+                for k in range(n):
+                    if k == i or k == j:
+                        continue
+                    if block_owners[k] is not None and block_owners[k] != block_owners[i] and block_owners[k] != block_owners[j]:
+                        kx0, ky0, kx1, ky1 = rects[k]
+                        kcx = 0.5 * (kx0 + kx1)
+                        kov_y = max(0.0, min(my_hi, ky1) - max(my_lo, ky0)) / max(1.0, min(my_hi - my_lo, ky1 - ky0))
+                        if mx_lo <= kcx <= mx_hi and kov_y >= 0.25:
+                            intervened = True
+                            break
+            if intervened:
+                continue
+
             if block_owners[i] is not None and block_owners[i] == block_owners[j]:
                 parent[find(j)] = find(i)
                 continue
@@ -1415,7 +1447,10 @@ def detect_and_recognize_page_regions(
             elif np.count_nonzero(ext_ring_full) >= 8:
                 env_diff_full = observed_background_contrast(sub_full_u8, ext_ring_full)
                 env_diff = env_diff_full[oy0:oy1, ox0:ox1]
-                te_loc, _ = otsu_threshold_and_eta(env_diff)
+                # Threshold in log-contrast space so multi-layer outlined glyphs (medium-contrast
+                # colored fill + extreme-contrast white/black rim) are not split in half by linear Otsu.
+                te_log, _ = otsu_threshold_and_eta(np.log1p(np.maximum(env_diff, 0.0)))
+                te_loc = float(np.expm1(te_log))
                 thresh_env = max(te_loc, np.sqrt(chi2.isf(0.05 / max(1, env_diff.size), 3)))
                 sub_ink = (env_diff > thresh_env).astype(np.uint8)
             else:
@@ -1632,6 +1667,32 @@ def detect_and_recognize_page_regions(
 
         col_items_ord = [(rects[k][0], rects[k][1], rects[k][2], rects[k][3], str(k), 1.0) for k in member_indices]
         ord_cols_meta = _order_text_boxes_1d(col_items_ord, vertical=is_vert)
+        if is_vert and len(ord_cols_meta) >= 2:
+            # A short vertical furigana/ruby side-column tucked beside the lower portion
+            # of a tall main column sits to its right (higher x), so strict RTL sorting
+            # places it ahead of the main line and would invert the sentence order.
+            # Defer such ruby side-columns after the main column they annotate.
+            reordered = list(ord_cols_meta)
+            idx_r = 0
+            while idx_r + 1 < len(reordered):
+                a_idx = int(reordered[idx_r][0])
+                b_idx = int(reordered[idx_r + 1][0])
+                ax0_c, ay0_c, ax1_c, ay1_c = rects[a_idx]
+                bx0_c, by0_c, bx1_c, by1_c = rects[b_idx]
+                ah_c, bh_c = max(1.0, ay1_c - ay0_c), max(1.0, by1_c - by0_c)
+                bw_c = max(1.0, bx1_c - bx0_c)
+                gap_ab = max(0.0, max(ax0_c, bx0_c) - min(ax1_c, bx1_c))
+                if (
+                    ah_c < 0.48 * bh_c
+                    and ay0_c >= by0_c + 0.25 * bh_c
+                    and ay1_c <= by1_c + 0.10 * bh_c
+                    and gap_ab <= 0.65 * bw_c
+                ):
+                    reordered[idx_r], reordered[idx_r + 1] = reordered[idx_r + 1], reordered[idx_r]
+                    idx_r += 2
+                else:
+                    idx_r += 1
+            ord_cols_meta = reordered
         col_boxes_ordered = [
             [
                 int(np.floor(rects[int(idx_s)][0])),

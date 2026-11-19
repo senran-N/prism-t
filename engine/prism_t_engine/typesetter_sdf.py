@@ -891,6 +891,7 @@ def _quadrilateral_layout(tokens, quads, shape, style, required_text, allowed_br
         local_style = style.model_copy(update={
             "source_font_size_px": fs,
             "outline_width_px": float(style.outline_width_px) * fs / source_scale,
+            "outer_outline_width_px": float(getattr(style, "outer_outline_width_px", 0.0) or 0.0) * fs / source_scale,
         })
         local_layout, ink = solve_sdf_knuth_plass_layout(
             line_text, ruby_pairs, np.ones((height, width), np.float32), (width / 2, height / 2), local_style,

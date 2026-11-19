@@ -63,6 +63,8 @@ class StyleSpec(BaseModel):
     fg_color_rgba: list[int] = Field(default_factory=lambda: [12, 12, 14, 255])
     outline_color_rgba: list[int] = Field(default_factory=lambda: [255, 255, 255, 255])
     outline_width_px: float = 0.0
+    outer_outline_color_rgba: list[int] = Field(default_factory=lambda: [0, 0, 0, 0])
+    outer_outline_width_px: float = 0.0
     blend_alpha: float = 1.0
     blend_mode: Literal["normal", "multiply", "screen"] = "normal"
     ink_density_orig: float = 0.25

@@ -35,10 +35,12 @@ type StyleSpec struct {
 	StrokeModulation float64 `json:"stroke_modulation"`
 	TremorAmplitude  float64 `json:"tremor_amplitude"`
 	SlantDeg         float64 `json:"slant_deg"`
-	FgColorRGBA      []int   `json:"fg_color_rgba"`
-	OutlineColorRGBA []int   `json:"outline_color_rgba"`
-	OutlineWidthPx   float64 `json:"outline_width_px"`
-	BlendAlpha       float64 `json:"blend_alpha"`
+	FgColorRGBA           []int   `json:"fg_color_rgba"`
+	OutlineColorRGBA      []int   `json:"outline_color_rgba"`
+	OutlineWidthPx        float64 `json:"outline_width_px"`
+	OuterOutlineColorRGBA []int   `json:"outer_outline_color_rgba,omitempty"`
+	OuterOutlineWidthPx   float64 `json:"outer_outline_width_px,omitempty"`
+	BlendAlpha            float64 `json:"blend_alpha"`
 	BlendMode        string  `json:"blend_mode"`
 	InkDensityOrig   float64 `json:"ink_density_orig"`
 	HollowMode       string  `json:"hollow_mode"`

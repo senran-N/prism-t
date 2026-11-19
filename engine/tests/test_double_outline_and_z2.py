@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 
 from prism_t_engine.deep_fusion import (
+    apply_exemplar_stroke_shader,
     extract_stroke_style_and_halo,
     extract_z2_foreground_occluders,
 )
@@ -93,8 +94,58 @@ def test_double_outlined_style_selects_inner_white_rim_not_muddy_gray():
         pigment_support=sub_mask.astype(np.uint8),
         substrate_support=sub_bg.astype(np.uint8),
     )
+    fg_rgb = np.array(style.fg_color_rgba[:3], dtype=float)
+    assert np.linalg.norm(fg_rgb - np.array([228.0, 54.0, 136.0])) < 20.0, f"expected pink fill, got {style.fg_color_rgba}"
     out_rgb = np.array(style.outline_color_rgba[:3], dtype=float)
     assert style.outline_width_px > 0.0
-    # Must select either the crisp inner white rim (~250) or crisp black rim (~0), NEVER a muddy gray midpoint (~128)
-    lum = float(np.mean(out_rgb))
-    assert lum >= 210.0 or lum <= 35.0, f"expected crisp rim color, got muddy gray {style.outline_color_rgba}"
+    assert float(np.mean(out_rgb)) >= 210.0, f"expected inner white rim, got {style.outline_color_rgba}"
+    assert style.outer_outline_width_px > 0.0, "expected detected outer black rim width > 0"
+    assert float(np.mean(style.outer_outline_color_rgba[:3])) <= 35.0, (
+        f"expected outer black rim, got {style.outer_outline_color_rgba}"
+    )
+
+    # Verify shader renders all 3 concentric layers (pink fill -> white inner -> black outer)
+    glyph = np.zeros((80, 80), dtype=np.float32)
+    cv2.rectangle(glyph, (30, 20), (50, 60), 1.0, -1)
+    z1 = apply_exemplar_stroke_shader(glyph, None, style)
+    assert z1[40, 40, 3] == 255
+    assert np.linalg.norm(z1[40, 40, :3].astype(float) - fg_rgb) < 10.0
+    # Inner white ring just outside glyph x=50
+    inner_x = min(79, 50 + max(1, int(round(0.5 * style.outline_width_px))))
+    assert float(np.mean(z1[40, inner_x, :3])) >= 200.0
+    # Outer black ring outside white ring
+    outer_x = min(79, 50 + int(round(style.outline_width_px + 0.5 * style.outer_outline_width_px + 0.5)))
+    assert z1[40, outer_x, 3] > 60
+    assert float(np.mean(z1[40, outer_x, :3])) <= 60.0
+
+
+def test_enclosed_solid_heart_symbol_not_dropped_by_stroke_growth_bound():
+    """A thick filled heart ♥ enclosed inside its outline must be erased completely,
+    not pruned as a 'wide shirt' by bound_observed_stroke_growth."""
+    H, W = 160, 100
+    rgb = np.full((H, W, 3), [145, 90, 175], dtype=np.uint8)
+    core = np.zeros((H, W), dtype=np.uint8)
+    # Thin stroke glyphs at top
+    cv2.putText(core, "A", (34, 48), cv2.FONT_HERSHEY_SIMPLEX, 1.3, 1, 3)
+    # Thick solid circular/heart blob at bottom (radius ~ 11px >> kanji stroke radius ~ 1.5px)
+    cv2.circle(core, (50, 110), 11, 1, -1)
+    k_w = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    k_b = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
+    white_ring = (cv2.dilate(core, k_w) > 0) & (core == 0)
+    black_ring = (cv2.dilate(core, k_b) > 0) & (cv2.dilate(core, k_w) == 0)
+    rgb[black_ring] = [5, 2, 7]
+    rgb[white_ring] = [252, 245, 250]
+    rgb[core > 0] = [228, 56, 138]
+
+    obs = ((core > 0) | white_ring | black_ring).astype(np.uint8)
+    prob = np.zeros((H, W), dtype=np.float32)
+    prob[core > 0] = 0.90
+    prob[white_ring] = 0.70
+    prob[black_ring] = 0.30
+    seed = cv2.dilate(obs, np.ones((9, 9), np.uint8))
+
+    alpha = refine_text_alpha(rgb, prob, seed, observed_ink=obs)
+    heart_mask = np.zeros((H, W), dtype=bool)
+    cv2.circle(heart_mask.view(np.uint8), (50, 110), 10, 1, -1)
+    heart_recall = float(np.count_nonzero((alpha > 0) & heart_mask)) / float(np.count_nonzero(heart_mask))
+    assert heart_recall >= 0.95, f"solid enclosed heart core was dropped: recall={heart_recall:.3f}"

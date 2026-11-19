@@ -495,7 +495,14 @@ def extract_stroke_style_and_halo(
     local_source_contrast = np.array([
         np.median(local_contrast[pigment_labels == j]) for j in range(len(pigments))])
     critical = chi2.isf(.05/(2*len(pigments)),3)
-    pigment_evidence = source_contrast > critical
+    boundary_frac = np.array([
+        float(np.mean(dist_in[pigment_labels == j] <= 1.5)) for j in range(len(pigments))
+    ])
+    # A character-coded glyph core enclosed inside an outline (low boundary exposure,
+    # strictly deeper than the median stroke radius) often shares hue with the speaker's
+    # hair or clothing elsewhere in the ROI; local substrate contrast proves it is ink.
+    enclosed_core = (boundary_frac <= 0.10) & (depths > radius) & (local_source_contrast > critical)
+    pigment_evidence = (source_contrast > critical) | enclosed_core
     outline_evidence = pigment_evidence | np.array([
         np.quantile(local_contrast[pigment_labels == j], .75) > critical
         for j in range(len(pigments))])
@@ -530,7 +537,16 @@ def extract_stroke_style_and_halo(
             residual = np.linalg.norm(color-projected)
             sep = np.maximum(np.abs(color-projected)-1.0, 0.0)
             whitened_sq = float(np.sum((sep/pair_noise)**2))
-            if 0 < amount < 1 and (residual <= noise or whitened_sq <= mix_critical):
+            # A genuine blend must lie strictly between both endpoints, not coincide with one
+            # (e.g. a white outline matching white clothing in `substrate_pigments` at amount ~ 0).
+            dist_a = float(np.linalg.norm(color - others[a]))
+            dist_b = float(np.linalg.norm(color - others[b]))
+            if (
+                0 < amount < 1
+                and dist_a > max(noise, 2.0)
+                and dist_b > max(noise, 2.0)
+                and (residual <= noise or whitened_sq <= mix_critical)
+            ):
                 endpoints[j] = False
     candidates = pigment_evidence & endpoints
     if not candidates.any():
@@ -541,39 +557,77 @@ def extract_stroke_style_and_halo(
         # antialias edges against distant, differently colored artwork.
         scores = np.where(endpoints, local_source_contrast, -np.inf) if endpoints.any() else local_source_contrast
     else:
-        # Thickness times substrate-normalized contrast measures spatial ink
-        # signal. Depth alone can prefer a thick pale edge over a thin ink core;
-        # contrast alone can prefer a bright outer outline over its inner fill.
-        scores = np.where(candidates, depths*np.sqrt(source_contrast), -np.inf)
-    fill_id = max(range(len(pigments)), key=lambda j: (scores[j], source_contrast[j]))
+        # Compute concentric depth strictly inside the union of proven ink candidates
+        # (stripping out any leaked background/paper clusters inside `active`) so true
+        # inner glyph fills sit strictly deeper than outer outlines and AA fringes.
+        proven_ink_mask = np.isin(pigment_labels, np.flatnonzero(candidates))
+        ink_dist = distance_transform_edt(proven_ink_mask)
+        ink_depths = np.array([
+            float(np.median(ink_dist[pigment_labels == j])) if candidates[j] else 0.0
+            for j in range(len(pigments))
+        ])
+        eff_contrast = np.where(enclosed_core, np.maximum(source_contrast, local_source_contrast), source_contrast)
+        scores = np.where(candidates, ink_depths * np.log1p(np.maximum(eff_contrast, 0.0)), -np.inf)
+    fill_id = max(range(len(pigments)), key=lambda j: (scores[j], local_source_contrast[j], source_contrast[j]))
     core = pigment_labels == fill_id
     fg_med = pigments[fill_id]
     fg_rgba = [int(c) for c in np.rint(fg_med)] + [255]
     outline_rgba = [255, 255, 255, 255]
     outline_w = 0.0
+    outer_outline_rgba = [0, 0, 0, 0]
+    outer_outline_w = 0.0
     internal_outlined = False
     pure_core = roi_rgb[core]
     if len(pigments) > 1:
-        # Score candidate outlines on the immediate adjacency band around `core` so
-        # double-outlined glyphs (fill + inner white rim + outer black rim) cleanly
-        # select the true inner rim instead of averaging inner+outer into muddy gray.
+        # Scale-invariant concentric shell separation:
+        # In a 3-layer double-outlined glyph (fill -> inner rim -> outer rim), an outer
+        # shell `k` sits strictly beyond an inner shell `j` (q25(to_fill[k]) > q50(to_fill[j]))
+        # in a distinct color direction from `[fg -> j]` (cos <= 0.85), whereas an AA edge
+        # leading into a single outline shares the same color ray (cos > 0.85).
         to_fill = distance_transform_edt(~core)
         q1_act, q3_act = np.quantile(dist_in[active], [0.25, 0.75])
         rim_fence = max(2.0, float(q3_act + 1.5 * (q3_act - q1_act)))
-        near_ring = active & (~core) & (to_fill <= max(2.0, float(q3_act)))
-        eval_mask = near_ring if int(np.count_nonzero(near_ring)) >= 12 else (active & (~core))
+        valid_rim_ids = [
+            j for j in range(len(pigments))
+            if j != fill_id
+            and float(np.dot(pigments[j] - fg_med, pigments[j] - fg_med)) > 0.0
+            and outline_evidence[j]
+            and endpoints[j]
+            and depths[j] <= depths[fill_id]
+        ]
+        outer_shell_ids: set[int] = set()
+        if len(valid_rim_ids) >= 2:
+            rim_q25 = {j: float(np.quantile(to_fill[pigment_labels == j], 0.25)) for j in valid_rim_ids}
+            rim_q50 = {j: float(np.quantile(to_fill[pigment_labels == j], 0.50)) for j in valid_rim_ids}
+            for k in valid_rim_ids:
+                vk = pigments[k] - fg_med
+                nk = float(np.linalg.norm(vk))
+                for j in valid_rim_ids:
+                    if j == k:
+                        continue
+                    if rim_q25[k] > rim_q50[j] and depths[k] < depths[j]:
+                        vj = pigments[j] - fg_med
+                        nj = float(np.linalg.norm(vj))
+                        cos_jk = float(np.dot(vk, vj) / max(nk * nj, 1e-6))
+                        if cos_jk <= 0.85 or nk <= nj:
+                            outer_shell_ids.add(k)
+                            break
+        inner_eval_mask = active & (~core) & (to_fill <= rim_fence)
+        if outer_shell_ids:
+            filtered_eval = inner_eval_mask & (~np.isin(pigment_labels, list(outer_shell_ids)))
+            if int(np.count_nonzero(filtered_eval)) >= 12:
+                inner_eval_mask = filtered_eval
+        eval_mask = inner_eval_mask if int(np.count_nonzero(inner_eval_mask)) >= 12 else (active & (~core))
         pixels = roi_rgb[eval_mask].astype(float)
         scores = np.full(len(pigments), -np.inf)
-        for j, color in enumerate(pigments):
+        for j in valid_rim_ids:
+            if j in outer_shell_ids:
+                continue
+            color = pigments[j]
             direction = color - fg_med
             length2 = float(direction @ direction)
-            if (j == fill_id or length2 == 0 or not outline_evidence[j]
-                    or not endpoints[j] or depths[j] > depths[fill_id]):
-                continue
             amount = np.clip((pixels - fg_med) @ direction / length2, 0, 1)
             errors = np.linalg.norm(pixels - (fg_med + amount[:, None] * direction), axis=1)
-            # Score all source samples. A median lets an intermediate edge
-            # explain half the samples while ignoring the actual outer pigment.
             scores[j] = -float(np.mean(errors**2))
         rim_id = int(np.argmax(scores))
         rim = pigment_labels == rim_id
@@ -597,11 +651,65 @@ def extract_stroke_style_and_halo(
             if accept_rim:
                 # Restrict profiling to the measured stroke thickness: disconnected
                 # background-color islands cannot become a giant outline estimate.
-                rim_distances = to_fill[rim & (to_fill <= rim_fence)]
+                rim_band = rim & (to_fill <= rim_fence)
+                rim_distances = to_fill[rim_band]
                 if rim_distances.size:
                     outline_w = float(np.median(rim_distances))
                     outline_rgba = [int(c) for c in np.rint(pigments[rim_id])] + [255]
                     internal_outlined = True
+
+                    # Detect an optional 2nd concentric outer outline (e.g. black outer rim
+                    # wrapping a white inner rim on full-color manga dialogue).
+                    if len(pigments) > 2:
+                        inner_union = core | rim_band
+                        to_inner = distance_transform_edt(~inner_union)
+                        outer_reach = max(2.5, 0.85 * max(outline_w, 1.5))
+                        outer_contact = active & (~inner_union) & (to_inner <= outer_reach)
+                        n_outer_contact = int(np.count_nonzero(outer_contact))
+                        if n_outer_contact >= 12:
+                            rim_med = pigments[rim_id]
+                            sub_center_o = np.median(roi_rgb[collar].astype(float), axis=0) if collar.any() else None
+                            outer_pixels = roi_rgb[outer_contact].astype(float)
+                            outer_scores = np.full(len(pigments), -np.inf)
+                            for k, ocolor in enumerate(pigments):
+                                if (k in (fill_id, rim_id) or not outline_evidence[k]
+                                        or not endpoints[k] or depths[k] >= depths[rim_id]):
+                                    continue
+                                if float(np.linalg.norm(ocolor - rim_med)) <= max(32.0, 4.0 * noise):
+                                    continue
+                                # Reject a cluster that is merely substrate color or a convex
+                                # AA blend between inner rim and visible substrate.
+                                if sub_center_o is not None:
+                                    if float(np.linalg.norm(ocolor - sub_center_o)) <= max(24.0, 3.5 * noise):
+                                        continue
+                                    sdir = sub_center_o - rim_med
+                                    slen2 = float(sdir @ sdir)
+                                    if slen2 > 0:
+                                        ts = float((ocolor - rim_med) @ sdir / slen2)
+                                        if 0.05 <= ts <= 1.05:
+                                            oproj = rim_med + np.clip(ts, 0.0, 1.0) * sdir
+                                            osep = np.maximum(np.abs(ocolor - oproj) - 1.0, 0.0)
+                                            if float(np.sum((osep / pair_noise) ** 2)) <= chi2.isf(.05/max(1, len(pigments)), 2):
+                                                continue
+                                occ_k = int(np.count_nonzero(outer_contact & (pigment_labels == k)))
+                                if occ_k < max(12, int(0.25 * n_outer_contact)):
+                                    continue
+                                odir = ocolor - rim_med
+                                olen2 = float(odir @ odir)
+                                if olen2 == 0:
+                                    continue
+                                oamt = np.clip((outer_pixels - rim_med) @ odir / olen2, 0.0, 1.0)
+                                oerr = np.linalg.norm(outer_pixels - (rim_med + oamt[:, None] * odir), axis=1)
+                                outer_scores[k] = -float(np.mean(oerr**2))
+                            outer_id = int(np.argmax(outer_scores))
+                            if np.isfinite(outer_scores[outer_id]):
+                                outer_cap = max(3.0, min(rim_fence, 1.8 * max(outline_w, 1.5)))
+                                outer_dists = to_inner[(pigment_labels == outer_id) & (to_inner <= outer_cap)]
+                                if outer_dists.size >= 12:
+                                    med_ow2 = float(np.median(outer_dists))
+                                    if med_ow2 >= 0.75:
+                                        outer_outline_w = med_ow2
+                                        outer_outline_rgba = [int(c) for c in np.rint(pigments[outer_id])] + [255]
 
     core_radii = distance_transform_edt(core)[core]
     eff_sw = float(2 * np.median(core_radii)) if core_radii.size else float(stroke_w)
@@ -688,6 +796,8 @@ def extract_stroke_style_and_halo(
         fg_color_rgba=fg_rgba,
         outline_color_rgba=outline_rgba,
         outline_width_px=outline_w,
+        outer_outline_color_rgba=outer_outline_rgba,
+        outer_outline_width_px=outer_outline_w,
         blend_alpha=1.0,
         blend_mode="normal",
         ink_density_orig=ink_density_orig,
@@ -718,13 +828,18 @@ def apply_exemplar_stroke_shader(
         return out_rgba
 
     halo_w = float(style.outline_width_px)
+    outer_w = float(getattr(style, "outer_outline_width_px", 0.0) or 0.0)
+    has_outer = halo_w > 0.25 and outer_w > 0.25
     tremor_amp = float(style.tremor_amplitude)
     # Pixel-grid Nyquist AA half-width (<= 0.5px) + scale-proportional outer visual feathering
     aa_half = 0.50 if halo_w > 0.25 else 0.0
     feather_span = (0.25 * halo_w) if halo_w > 0.25 else 0.0
     r_out = halo_w + aa_half + 0.5 * feather_span
     edge_width = max(2.0 * aa_half + feather_span, 1e-3)
-    pad = int(np.ceil(max(r_out if halo_w > 0.25 else 0.0, 0.0) + max(tremor_amp, 0.0) + 1.0))
+    outer_feather = (0.25 * outer_w) if has_outer else 0.0
+    r_outer_total = (halo_w + outer_w + aa_half + 0.5 * outer_feather) if has_outer else r_out
+    outer_edge_width = max(2.0 * aa_half + outer_feather, 1e-3)
+    pad = int(np.ceil(max(r_outer_total if halo_w > 0.25 else 0.0, 0.0) + max(tremor_amp, 0.0) + 1.0))
     y0 = max(0, int(nz_y.min()) - pad)
     y1 = min(h, int(nz_y.max()) + pad + 1)
     x0 = max(0, int(nz_x.min()) - pad)
@@ -732,6 +847,7 @@ def apply_exemplar_stroke_shader(
     ch, cw = y1 - y0, x1 - x0
     crop_alpha = glyph_alpha[y0:y1, x0:x1]
 
+    inner_cov: np.ndarray | None = None
     if tremor_amp > 0.05:
         base_bin = crop_alpha >= 0.5
         if not np.any(base_bin):
@@ -757,7 +873,12 @@ def apply_exemplar_stroke_shader(
             fg_cov = np.clip(sdf + 0.5, 0.0, 1.0)
             if halo_w > 0.25:
                 t_edge = np.clip((sdf + r_out) / edge_width, 0.0, 1.0)
-                total_cov = t_edge * t_edge * (3.0 - 2.0 * t_edge)
+                inner_cov = t_edge * t_edge * (3.0 - 2.0 * t_edge)
+                if has_outer:
+                    t_outer = np.clip((sdf + r_outer_total) / outer_edge_width, 0.0, 1.0)
+                    total_cov = t_outer * t_outer * (3.0 - 2.0 * t_outer)
+                else:
+                    total_cov = inner_cov
             else:
                 total_cov = fg_cov.copy()
     else:
@@ -782,14 +903,24 @@ def apply_exemplar_stroke_shader(
                     -np.maximum(d_out_up - half_px, 0.0),
                 )
                 t_edge = np.clip((sdf_up + r_out) / edge_width, 0.0, 1.0)
-                total_cov_up = t_edge * t_edge * (3.0 - 2.0 * t_edge)
-                total_cov = cv2.resize(total_cov_up, (cw, ch), interpolation=cv2.INTER_AREA)
+                inner_cov_up = t_edge * t_edge * (3.0 - 2.0 * t_edge)
+                inner_cov = cv2.resize(inner_cov_up, (cw, ch), interpolation=cv2.INTER_AREA)
+                if has_outer:
+                    t_outer = np.clip((sdf_up + r_outer_total) / outer_edge_width, 0.0, 1.0)
+                    total_cov_up = t_outer * t_outer * (3.0 - 2.0 * t_outer)
+                    total_cov = cv2.resize(total_cov_up, (cw, ch), interpolation=cv2.INTER_AREA)
+                else:
+                    total_cov = inner_cov
         else:
             total_cov = fg_cov.copy()
 
     # An outline adds coverage. Binarizing an antialiased glyph for its SDF
     # must never erase fractional fill samples at that boundary.
-    total_cov = np.maximum(total_cov, fg_cov)
+    if inner_cov is None:
+        inner_cov = np.maximum(total_cov, fg_cov)
+    else:
+        inner_cov = np.maximum(inner_cov, fg_cov)
+    total_cov = np.maximum(total_cov, inner_cov)
 
     # Build interior RGB fill from exemplar patch (tiled/interpolated smoothly along glyph vertical extent)
     if exemplar_patch is not None and exemplar_patch.size >= 12:
@@ -804,10 +935,19 @@ def apply_exemplar_stroke_shader(
         )
 
     halo_rgb = np.array(style.outline_color_rgba[:3], dtype=np.float32)[None, None, :]
-    # Composite foreground fill over halo ring in premultiplied alpha space
+    # Composite foreground fill over inner halo (and optional outer halo) in premultiplied alpha space
     denom_a = np.maximum(total_cov, 1e-6)
-    ring_only = np.maximum(total_cov - fg_cov, 0.0)
-    comp_rgb = (fg_cov[:, :, None] * fill_rgb + ring_only[:, :, None] * halo_rgb) / denom_a[:, :, None]
+    inner_ring = np.maximum(inner_cov - fg_cov, 0.0)
+    if has_outer:
+        outer_halo_rgb = np.array(style.outer_outline_color_rgba[:3], dtype=np.float32)[None, None, :]
+        outer_ring = np.maximum(total_cov - inner_cov, 0.0)
+        comp_rgb = (
+            fg_cov[:, :, None] * fill_rgb
+            + inner_ring[:, :, None] * halo_rgb
+            + outer_ring[:, :, None] * outer_halo_rgb
+        ) / denom_a[:, :, None]
+    else:
+        comp_rgb = (fg_cov[:, :, None] * fill_rgb + inner_ring[:, :, None] * halo_rgb) / denom_a[:, :, None]
 
     alpha_u8 = np.clip(np.rint(total_cov * 255.0 * float(style.blend_alpha)), 0, 255).astype(np.uint8)
     active_out = alpha_u8 > 0

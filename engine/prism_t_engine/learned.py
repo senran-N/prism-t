@@ -58,7 +58,7 @@ def stroke_palette(
     total_weight = float(n)
     weighted_colors = colors * counts[:, None]
     best = None
-    pigment_roles = ("fill", "outline", "anti_alias", "background")
+    pigment_roles = ("fill", "inner_outline", "outer_outline", "anti_alias", "background")
     colors_sq = np.sum(colors * colors, axis=1)
     max_k = min(len(pigment_roles), len(colors))
     for k in range(1, max_k + 1):
@@ -75,7 +75,7 @@ def stroke_palette(
                     min_d = np.minimum(min_d, d_new)
             centers = np.array(centers)
             previous = None
-            while True:
+            for _ in range(100):
                 centers_sq = np.sum(centers * centers, axis=1)
                 dists = colors_sq[:, None] + centers_sq[None, :] - 2.0 * (colors @ centers.T)
                 labels = np.argmin(dists, axis=1).astype(np.int32)
@@ -331,9 +331,25 @@ def bound_observed_stroke_growth(rgb: np.ndarray, observed: np.ndarray,
         # without clipping isolated T/X junctions or trusting filled neural tubes.
         extent = maximum(distance_transform_edt(wide), labels=regions, index=np.arange(count))
         broad_ids = np.flatnonzero(extent > radius_limit)
-        broad = np.isin(regions, broad_ids[broad_ids != 0])
-        if broad.any():
-            permitted &= ~mode | (distance_transform_edt(~broad) > radius_limit)
+        broad_ids = broad_ids[broad_ids != 0]
+        if broad_ids.size:
+            # A solid enclosed glyph symbol (e.g. a filled heart ♥ surrounded by its
+            # outline inside `observed`) is wider than a kanji stroke, yet its own
+            # perimeter touches ONLY other ink layers inside `observed` (not `~observed`).
+            # Comparing perimeter-on-exterior / total-perimeter is strictly scale-invariant.
+            _, mode_cc = cv2.connectedComponents(mode.astype(np.uint8), connectivity=8)
+            obs_boundary = radii <= 1.5
+            mode_boundary = distance_transform_edt(mode) <= 1.5
+            keep_reject = []
+            for bid in broad_ids:
+                cc_ids = np.unique(mode_cc[regions == bid])
+                cc_ids = cc_ids[cc_ids != 0]
+                parent_edge = np.isin(mode_cc, cc_ids) & mode_boundary
+                if not np.any(parent_edge) or float(np.mean(obs_boundary[parent_edge])) > 0.15:
+                    keep_reject.append(int(bid))
+            if keep_reject:
+                broad = np.isin(regions, keep_reject)
+                permitted &= ~mode | (distance_transform_edt(~broad) > radius_limit)
     # A rejected solid width cannot regrow. Off-palette samples still get an
     # independent optical-mixture assessment below: real antialias edges need
     # not match any solid pigment, even when contrast extraction observed them.
