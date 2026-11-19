@@ -730,9 +730,9 @@ def detect_and_synthesize_halftone_fft(
         return False, roi_rgb.astype(np.float64)
 
     img_f = roi_rgb.astype(np.float64)
-    # 1. Smooth low-frequency substrate/tone envelope across mask via exact Laplace Dirichlet
+    # 1. Smooth low-frequency substrate/tone envelope across mask via fast multigrid Laplace
     k_blur = max(7, (min(h, w) // 5) | 1)
-    init_rgb = solve_laplace_dirichlet(img_f, mask_bool)
+    init_rgb = solve_laplace_dirichlet_fast(img_f, mask_bool)
     low_pass = cv2.GaussianBlur(init_rgb, (k_blur, k_blur), 0)
 
     residual_rgb = img_f - low_pass

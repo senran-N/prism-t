@@ -47,6 +47,15 @@ def stroke_palette(
             | rgb_s[:, 2].astype(np.uint32)
         )
         _, first_idx, inverse, counts = np.unique(packed, return_index=True, return_inverse=True, return_counts=True)
+        if len(first_idx) > 512:
+            # Quantize noisy/shaded 24-bit color histograms to 6-bit/channel (4-step bins)
+            # during BIC/Lloyd fitting for ~30x speedup; final medians still use exact RGB.
+            packed_q = (
+                ((rgb_s[:, 0].astype(np.uint32) >> 2) << 12)
+                | ((rgb_s[:, 1].astype(np.uint32) >> 2) << 6)
+                | (rgb_s[:, 2].astype(np.uint32) >> 2)
+            )
+            _, first_idx, inverse, counts = np.unique(packed_q, return_index=True, return_inverse=True, return_counts=True)
         colors = lab[sy[first_idx], sx[first_idx]].astype(np.float64)
         n, dims = len(sy), 3
     else:
