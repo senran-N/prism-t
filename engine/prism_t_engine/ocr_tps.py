@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 from PIL import Image
 from scipy.interpolate import UnivariateSpline
+from scipy.ndimage import distance_transform_edt
 from .preprocess import estimate_noise_sigma, estimate_substrate_noise, substrate_squared_distance, otsu_threshold_and_eta
 from .restoration import solve_laplace_dirichlet_fast
 from scipy.stats import chi2
@@ -1182,6 +1183,21 @@ def detect_and_recognize_page_regions(
                         if np.count_nonzero(on_frame) > on_frame.size / 2:
                             continue
             if not recognize_text:
+                if text_probability is not None and raw_boxes:
+                    px, py, pw, ph = cv2.boundingRect(polygon)
+                    mx0, my0 = max(0, px), max(0, py)
+                    mx1, my1 = min(W, px + pw), min(H, py + ph)
+                    if mx1 <= mx0 or my1 <= my0:
+                        continue
+                    pm = np.zeros((my1 - my0, mx1 - mx0), dtype=np.uint8)
+                    cv2.fillPoly(pm, [np.rint(polygon - np.array([[mx0, my0]], dtype=np.float32)).astype(np.int32)], 1)
+                    p_vals = text_probability[my0:my1, mx0:mx1][pm > 0]
+                    if (
+                        p_vals.size < 16
+                        or float(np.quantile(p_vals, 0.90)) < max(0.60, page_cut)
+                        or float(np.mean(p_vals > page_cut)) < 0.16
+                    ):
+                        continue
                 raw_boxes.append((polygon, "", 0.0))
                 continue
             x, y, w, h = cv2.boundingRect(polygon)
@@ -1271,7 +1287,7 @@ def detect_and_recognize_page_regions(
                 (gap_x <= 0.55 * s_hi and overlap_y >= 0.35)
                 or (gap_y <= 0.55 * s_hi and overlap_x >= 0.35)
             )
-            char_s = s_hi if (s_hi <= 1.8 * max(s_lo, 1.0)) else s_lo
+            char_s = min(s_hi, 1.25 * s_lo) if (s_hi <= 1.8 * max(s_lo, 1.0)) else s_lo
             close_columns = ((gap_x <= 1.45 * char_s) and (overlap_y >= 0.25)) or (
                 adj_ruby and gap_x <= 0.55 * s_hi and overlap_y >= 0.35
             )
@@ -1280,6 +1296,30 @@ def detect_and_recognize_page_regions(
             )
             if not (close_columns or close_rows):
                 continue
+
+            # Do not pull a tiny floating SFX owned by a distinct detector block (or
+            # dangling mid-span beside a tall column with no top/bottom alignment) into
+            # an unowned main dialogue column, and do not chain unowned lines across a
+            # wide gap into a separate detector block.
+            same_block = (block_owners[i] is not None) and (block_owners[i] == block_owners[j])
+            one_sided_block = (block_owners[i] is None) != (block_owners[j] is None)
+            if not same_block and not adj_ruby:
+                if close_columns:
+                    len_ratio = min(ah, bh) / max(ah, bh, 1.0)
+                    top_aligned = abs(ay0 - by0) <= 1.5 * s_hi
+                    bot_aligned = abs(ay1 - by1) <= 1.5 * s_hi
+                    if len_ratio < 0.22 and not (top_aligned or bot_aligned):
+                        continue
+                    if one_sided_block and gap_x > 0.85 * s_lo and len_ratio < 0.50:
+                        continue
+                elif close_rows:
+                    len_ratio = min(aw, bw) / max(aw, bw, 1.0)
+                    left_aligned = abs(ax0 - bx0) <= 1.5 * s_hi
+                    right_aligned = abs(ax1 - bx1) <= 1.5 * s_hi
+                    if len_ratio < 0.22 and not (left_aligned or right_aligned):
+                        continue
+                    if one_sided_block and gap_y > 0.85 * s_lo and len_ratio < 0.50:
+                        continue
 
             # Never bridge two lines across an intervening line owned by a different block.
             intervened = False
@@ -1422,6 +1462,7 @@ def detect_and_recognize_page_regions(
             sub_f = roi_f[py0:py1, px0:px1]
             ext_mad = float("inf")
             ext_q75 = float("inf")
+            ext_q90 = float("inf")
             em_rgb = None
             if np.count_nonzero(ext_ring_full) >= 8:
                 ext_px = sub_full_f[ext_ring_full]
@@ -1429,9 +1470,16 @@ def detect_and_recognize_page_regions(
                 ext_devs = np.linalg.norm(ext_px - em_rgb[None, :], axis=1)
                 ext_mad = 1.4826 * float(np.median(ext_devs))
                 ext_q75 = float(np.quantile(ext_devs, 0.75))
+                ext_q90 = float(np.quantile(ext_devs, 0.90))
 
             unif_tol = max(4.5 * sigma_page, 0.20 * max(gap_loc, 1.0))
-            if np.isfinite(ext_mad) and ext_mad <= unif_tol and ext_q75 <= 1.5 * unif_tol and em_rgb is not None:
+            if (
+                np.isfinite(ext_mad)
+                and ext_mad <= unif_tol
+                and ext_q75 <= 1.5 * unif_tol
+                and ext_q90 <= 1.85 * unif_tol
+                and em_rgb is not None
+            ):
                 # Anchor luminance polarity directly to the observed exterior
                 # substrate instead of pixel-area majority (which flips on tall
                 # bright-on-dark columns).
@@ -1447,12 +1495,18 @@ def detect_and_recognize_page_regions(
             elif np.count_nonzero(ext_ring_full) >= 8:
                 env_diff_full = observed_background_contrast(sub_full_u8, ext_ring_full)
                 env_diff = env_diff_full[oy0:oy1, ox0:ox1]
-                # Threshold in log-contrast space so multi-layer outlined glyphs (medium-contrast
-                # colored fill + extreme-contrast white/black rim) are not split in half by linear Otsu.
-                te_log, _ = otsu_threshold_and_eta(np.log1p(np.maximum(env_diff, 0.0)))
-                te_loc = float(np.expm1(te_log))
-                thresh_env = max(te_loc, np.sqrt(chi2.isf(0.05 / max(1, env_diff.size), 3)))
+                te_loc, _ = otsu_threshold_and_eta(env_diff)
+                noise_crit = float(np.sqrt(chi2.isf(0.05 / max(1, env_diff.size), 3)))
+                thresh_env = max(float(te_loc), noise_crit)
                 sub_ink = (env_diff > thresh_env).astype(np.uint8)
+                if text_probability is not None:
+                    p_sub = text_probability[y0 + py0 : y0 + py1, x0 + px0 : x0 + px1]
+                    if p_sub.size >= 16:
+                        tp_loc, _ = otsu_threshold_and_eta(p_sub)
+                        if tp_loc > 0.0:
+                            # Recover medium-contrast colored glyph cores directly confirmed
+                            # by neural glyph segmentation without lowering Otsu on background art.
+                            sub_ink |= ((p_sub > tp_loc) & (env_diff > noise_crit)).astype(np.uint8)
             else:
                 if text_probability is not None:
                     p_sub = text_probability[y0 + py0 : y0 + py1, x0 + px0 : x0 + px1]
@@ -1486,8 +1540,24 @@ def detect_and_recognize_page_regions(
                 ink_bin[lbl_b == cid_b] = 0
 
         observed_strokes = ink_bin & poly_guard
-        # Confine ink_bin strictly to union of detected polygon interiors (+proportional stroke tip margin)
-        ink_bin = ink_bin & poly_guard
+        # Confine ink_bin strictly to union of detected polygon interiors (+proportional stroke tip margin),
+        # and when selective neural glyph segmentation is available, confine observed strokes to the
+        # scale-proportional neighborhood of neural glyphs so textured walls/skin inside bbox never enter.
+        if roi_tp is not None and roi_tp_cut > 0.0 and np.any(poly_guard > 0):
+            tp_seed = (roi_tp > roi_tp_cut) & (poly_guard > 0)
+            tp_frac = float(np.count_nonzero(tp_seed)) / float(max(1, np.count_nonzero(poly_guard > 0)))
+            if int(np.count_nonzero(tp_seed)) >= 8 and 0.02 <= tp_frac <= 0.65:
+                r_tp = float(np.quantile(distance_transform_edt(tp_seed)[tp_seed], 0.75))
+                near_tp = distance_transform_edt(~tp_seed) <= max(4.5, 2.4 * r_tp)
+                gated = (observed_strokes > 0) & near_tp
+                n_cc_g, lbl_g = cv2.connectedComponents(gated.astype(np.uint8), connectivity=8)
+                if n_cc_g > 1:
+                    hit_ids = np.unique(lbl_g[tp_seed])
+                    hit_ids = hit_ids[hit_ids != 0]
+                    gated = np.isin(lbl_g, hit_ids)
+                if np.any(gated):
+                    observed_strokes = gated.astype(np.uint8)
+        ink_bin = observed_strokes.copy()
 
         base_mask, ruby_mask = separate_kanji_ruby_components(ink_bin, vertical=is_vert)
         if len(member_indices) == 1:

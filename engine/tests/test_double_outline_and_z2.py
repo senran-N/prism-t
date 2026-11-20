@@ -178,3 +178,48 @@ def test_unchanged_surface_text_skips_erasure_and_preserves_raw_pixels():
     )
     comp = decode_image_b64(resp.composite_png_b64, mode="RGB")
     assert np.array_equal(comp, raw), "unchanged surface label must remain bit-exact untouched"
+
+
+def test_double_outline_on_textured_brick_background_does_not_bleed_into_mortar():
+    """On non-smooth textured artwork (e.g., brick walls or shaded anatomy),
+    refine_text_alpha must tightly follow the glyph and its double outline
+    instead of flooding 15-20px into surrounding mortar/background texture."""
+    from prism_t_engine.learned import refine_text_alpha
+
+    H, W = 220, 260
+    rgb = np.full((H, W, 3), [138, 72, 168], dtype=np.uint8)
+    # Draw crisp high-contrast brick mortar grid across the entire background.
+    for row_idx, y in enumerate(range(0, H, 28)):
+        rgb[max(0, y - 2) : min(H, y + 3), :] = [188, 128, 212]
+        offset = 32 if (row_idx % 2) else 0
+        for x in range(offset, W, 64):
+            rgb[y : min(H, y + 28), max(0, x - 2) : min(W, x + 3)] = [188, 128, 212]
+
+    core = np.zeros((H, W), dtype=np.uint8)
+    cv2.putText(core, "TEXT", (36, 130), cv2.FONT_HERSHEY_SIMPLEX, 2.2, 1, 7)
+    white_ring = (cv2.dilate(core, np.ones((7, 7), np.uint8)) > 0) & (core == 0)
+    black_ring = (cv2.dilate(((core > 0) | white_ring).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0) & (core == 0) & (~white_ring)
+    true_glyph = (core > 0) | white_ring | black_ring
+
+    rgb[black_ring] = [10, 8, 14]
+    rgb[white_ring] = [252, 246, 253]
+    rgb[core > 0] = [228, 56, 138]
+
+    obs = ((core > 0) | white_ring).astype(np.uint8)
+    prob = np.zeros((H, W), dtype=np.float32)
+    prob[core > 0] = 0.95
+    prob[white_ring] = 0.80
+    prob[black_ring] = 0.40
+    # Deliberately loose detector polygon covering surrounding brick mortar.
+    seed = np.zeros((H, W), dtype=np.uint8)
+    seed[45:175, 18:242] = 1
+
+    alpha = refine_text_alpha(rgb, prob, seed, observed_ink=obs)
+    pred = alpha > 0
+    glyph_recall = float(np.count_nonzero(pred & true_glyph)) / float(np.count_nonzero(true_glyph))
+    # Outside a 2px AA tolerance around true_glyph, brick mortar must stay clean!
+    near_glyph = cv2.dilate(true_glyph.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    far_bg = (seed > 0) & (~near_glyph)
+    bg_bleed = float(np.count_nonzero(pred & far_bg)) / float(max(1, np.count_nonzero(far_bg)))
+    assert glyph_recall >= 0.90, f"glyph+outline recall too low: {glyph_recall:.3f}"
+    assert bg_bleed <= 0.03, f"mask bled into textured brick background: bleed={bg_bleed:.3f}"

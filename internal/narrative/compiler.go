@@ -1103,7 +1103,7 @@ func (b *OpenAICompatibleBackend) TranslateNodes(
 		if hasLockedSource {
 			sb.WriteString(" Preserve locked source_text unchanged.")
 		}
-		sb.WriteString(" Preserve small kana, punctuation and column reading order. Resolve tone and speaker intent from the page. Do not invent dialogue outside the supplied nodes. Detector boxes on buttons, clothing folds, hair highlights, texture noise, or panel/frame lines with no genuine glyphs MUST be returned as is_text:false with a concise visual reason even if local source_readings contain noisy OCR guesses. Return is_text:true for actual text.\n")
+		sb.WriteString(" Preserve small kana, punctuation and column reading order. Resolve tone and speaker intent from the page. Do not invent dialogue outside the supplied nodes. Detector boxes on buttons, clothing folds, hair highlights, texture noise, censorship mosaics, or panel/frame lines with no genuine glyphs MUST be returned as is_text:false with a concise visual reason even if local source_readings contain noisy OCR guesses. Never copy or borrow text from a neighboring or overlapping callout box into an artwork box that owns no readable glyphs of its own (mark it is_text:false instead). Return is_text:true for actual text.\n")
 	}
 	response, err := b.completeJSON(ctx, sb.String(), userContent, translationResponseFormat(nodes), nodes)
 	if err != nil {

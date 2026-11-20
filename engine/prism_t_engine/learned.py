@@ -353,8 +353,15 @@ def bound_observed_stroke_growth(rgb: np.ndarray, observed: np.ndarray,
             for bid in broad_ids:
                 cc_ids = np.unique(mode_cc[regions == bid])
                 cc_ids = cc_ids[cc_ids != 0]
-                parent_edge = np.isin(mode_cc, cc_ids) & mode_boundary
-                if not np.any(parent_edge) or float(np.mean(obs_boundary[parent_edge])) > 0.15:
+                parent_cc = np.isin(mode_cc, cc_ids)
+                parent_edge = parent_cc & mode_boundary
+                is_enclosed_glyph = (
+                    np.any(parent_edge)
+                    and float(np.mean(obs_boundary[parent_edge])) <= 0.15
+                    and float(np.mean(anchors[parent_cc])) >= 0.50
+                    and float(extent[bid]) <= 5.0 * max(radius_limit, 1.0)
+                )
+                if not is_enclosed_glyph:
                     keep_reject.append(int(bid))
             if keep_reject:
                 broad = np.isin(regions, keep_reject)
@@ -518,7 +525,35 @@ def refine_text_alpha(rgb: np.ndarray, probability: np.ndarray, seed: np.ndarray
         # Color similarity alone is insufficient evidence of added lettering.
         extension &= contrast > critical
     edge_background = edge_delta = edge_noise = edge_contrast = None
-    edge_candidates = candidates & ~domain
+    # Harmonic interpolation is exact on flat substrates AND smooth affine gradients,
+    # where Δ(c0 + c1*x + c2*y) == 0. On non-smooth textured artwork (brick walls,
+    # skin shading, hair, clothing borders), harmonic interpolation across a 15-20px
+    # exterior band has large texture mismatch error. Test whether an affine RGB plane
+    # fits the observed exterior within chi2(0.85, 3); if not, bound exterior edge
+    # candidates and optical-mixture AA probes to a tight stroke-proportional rim and
+    # verify contrast against the nearest observed exterior pixel so textured artwork
+    # is never mistaken for a faint ink blend.
+    smooth_substrate = bool(flat_substrate)
+    if (not smooth_substrate) and background is not None and np.any(~domain):
+        ey, ex = np.nonzero(~domain)
+        if ey.size >= 16:
+            step = max(1, ey.size // 4096)
+            sy_s = ey[::step].astype(np.float64)
+            sx_s = ex[::step].astype(np.float64)
+            A = np.column_stack((
+                np.ones_like(sx_s),
+                sx_s / max(1.0, float(rgb.shape[1])),
+                sy_s / max(1.0, float(rgb.shape[0])),
+            ))
+            Y = rgb[ey[::step], ex[::step]].astype(np.float64)
+            coef, _, _, _ = np.linalg.lstsq(A, Y, rcond=None)
+            resid = (Y - A @ coef) / np.maximum(uncertainty, 1.0)
+            resid_sq = np.sum(resid ** 2, axis=1)
+            if float(np.quantile(resid_sq, 0.85)) <= float(chi2.ppf(0.85, 3)):
+                smooth_substrate = True
+    aa_rim_limit = float(collar) if smooth_substrate else min(float(collar), max(3.0, 0.55 * float(q3)))
+    edge_candidates = (candidates & ~domain) if smooth_substrate else ((outside <= aa_rim_limit) & ~domain)
+    nearest_ext_contrast = None
     if background is not None:
         # Assess uncertain pixels beyond the detector independently. Enlarging
         # its entire background hole changes core selection and can turn artwork
@@ -539,19 +574,34 @@ def refine_text_alpha(rgb: np.ndarray, probability: np.ndarray, seed: np.ndarray
                 edge_contrast = contrast
             else:
                 from .restoration import solve_laplace_dirichlet_fast
-                edge_background = solve_laplace_dirichlet_fast(rgb, candidates)
-                edge_noise = estimate_substrate_noise(rgb, ~candidates)
+                edge_hole = selected | edge_candidates
+                edge_background = solve_laplace_dirichlet_fast(rgb, edge_hole)
+                edge_noise = estimate_substrate_noise(rgb, ~edge_hole)
                 edge_delta = (rgb.astype(float) - edge_background) / edge_noise
                 edge_contrast = np.sum(edge_delta ** 2, axis=2)
+                if (not smooth_substrate) and np.any(~edge_hole):
+                    _, nn_e = distance_transform_edt(edge_hole, return_indices=True)
+                    nn_e_rgb = rgb[nn_e[0], nn_e[1]].astype(float)
+                    nn_e_delta = (rgb.astype(float) - nn_e_rgb) / (np.sqrt(2.0) * edge_noise)
+                    nearest_ext_contrast = np.sum(nn_e_delta ** 2, axis=2)
+                    edge_contrast = np.minimum(edge_contrast, nearest_ext_contrast)
             extension |= edge_candidates & (color_distance <= critical) & (edge_contrast > critical)
         # A glow or anti-aliased edge has neither the solid ink color nor the
         # background color: it lies between them. Comparing only to a solid
         # pigment leaves bright letter-shaped boundary samples visible, which
         # every restorer then propagates back into the erased glyph.
-        dom_candidates = domain & (outside <= collar) & ~selected
+        dom_candidates = domain & (outside <= aa_rim_limit) & ~selected
+        dom_ext_contrast = None
+        if (not smooth_substrate) and np.any(~domain):
+            _, nn_d = distance_transform_edt(domain, return_indices=True)
+            nn_d_rgb = rgb[nn_d[0], nn_d[1]].astype(float)
+            nn_d_delta = (rgb.astype(float) - nn_d_rgb) / (np.sqrt(2.0) * uncertainty)
+            dom_ext_contrast = np.sum(nn_d_delta ** 2, axis=2)
+            extension &= (~domain) | (dom_ext_contrast > critical)
         alpha_bonf = 0.05 / max(1, int(dom_candidates.sum()))
         proj_critical = chi2.isf(alpha_bonf, 1)
         orth_critical = chi2.isf(alpha_bonf, 2)
+        min_mix_frac = 0.0 if smooth_substrate else 0.25
         best_proj_dom = np.zeros(domain.shape, dtype=np.float64)
         best_orth_dom = np.full(domain.shape, np.inf, dtype=np.float64)
         best_proj_edge = np.zeros(domain.shape, dtype=np.float64)
@@ -562,8 +612,13 @@ def refine_text_alpha(rgb: np.ndarray, probability: np.ndarray, seed: np.ndarray
             fraction = np.clip(np.sum(delta * direction, axis=2) / np.maximum(energy, np.finfo(float).tiny), 0, 1)
             residual = np.sum((delta - fraction[:, :, None] * direction) ** 2, axis=2)
             proj_e = (fraction ** 2) * energy
-            extension |= dom_candidates & (proj_e > proj_critical) & (residual <= orth_critical)
-            take_dom = residual <= chi2.isf(0.01, 2)
+            dom_mix_ok = dom_candidates & (fraction >= min_mix_frac) & (proj_e > proj_critical) & (residual <= orth_critical)
+            if dom_ext_contrast is not None:
+                dom_mix_ok &= dom_ext_contrast > critical
+            extension |= dom_mix_ok
+            take_dom = (fraction >= min_mix_frac) & (residual <= chi2.isf(0.01, 2))
+            if dom_ext_contrast is not None:
+                take_dom &= dom_ext_contrast > chi2.isf(0.01, 3)
             best_proj_dom = np.where(take_dom & (proj_e > best_proj_dom), proj_e, best_proj_dom)
             best_orth_dom = np.minimum(best_orth_dom, residual)
             if edge_background is not None:
@@ -572,8 +627,13 @@ def refine_text_alpha(rgb: np.ndarray, probability: np.ndarray, seed: np.ndarray
                 fraction_e = np.clip(np.sum(edge_delta * direction_e, axis=2) / np.maximum(energy_e, np.finfo(float).tiny), 0, 1)
                 residual_e = np.sum((edge_delta - fraction_e[:, :, None] * direction_e) ** 2, axis=2)
                 proj_ee = (fraction_e ** 2) * energy_e
-                extension |= edge_candidates & (proj_ee > proj_critical) & (residual_e <= orth_critical)
-                take_edge = residual_e <= chi2.isf(0.01, 2)
+                edge_mix_ok = edge_candidates & (fraction_e >= min_mix_frac) & (proj_ee > proj_critical) & (residual_e <= orth_critical)
+                if nearest_ext_contrast is not None:
+                    edge_mix_ok &= nearest_ext_contrast > critical
+                extension |= edge_mix_ok
+                take_edge = (fraction_e >= min_mix_frac) & (residual_e <= chi2.isf(0.01, 2))
+                if nearest_ext_contrast is not None:
+                    take_edge &= nearest_ext_contrast > chi2.isf(0.01, 3)
                 best_proj_edge = np.where(take_edge & (proj_ee > best_proj_edge), proj_ee, best_proj_edge)
                 best_orth_edge = np.minimum(best_orth_edge, residual_e)
     extension &= ~rejected_observed
@@ -601,7 +661,10 @@ def refine_text_alpha(rgb: np.ndarray, probability: np.ndarray, seed: np.ndarray
             sy, sx = np.nonzero(shell_mask)
             in_dom = domain[sy, sx]
             pig_match = color_distance[sy, sx] <= chi2.isf(0.01, 3)
-            bg_stat = np.where(in_dom, contrast[sy, sx], edge_contrast[sy, sx] if edge_background is not None else 0.0)
+            dom_stat = contrast[sy, sx]
+            if dom_ext_contrast is not None:
+                dom_stat = np.minimum(dom_stat, dom_ext_contrast[sy, sx])
+            bg_stat = np.where(in_dom, dom_stat, edge_contrast[sy, sx] if edge_background is not None else 0.0)
             mix_stat = np.where(in_dom, best_proj_dom[sy, sx], best_proj_edge[sy, sx] if edge_background is not None else 0.0)
             p_vals = np.ones(len(sy), dtype=np.float64)
             if pig_match.any():
@@ -651,7 +714,7 @@ def _recover_outer_outline_shell(
          encirclement, distinguishing a glyph outline from a single touching sleeve or line);
       3. Remain bounded by the measured stroke scale (`collar`) and attached to `strong_attached`.
     """
-    rim_r = max(float(collar), 2.0 * float(q3))
+    rim_r = min(max(float(collar), 1.5 * float(q3)), 2.5 * max(float(q3), 1.5))
     if rim_r < 1.5 or not strong_attached.any():
         return strong_attached
 
