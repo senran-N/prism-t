@@ -1013,7 +1013,7 @@ def _run_lama_tiles(
     import gc
     import logging
     import torch
-    from .models import _LAMA_LOAD_LOCK, _lama_model_for_device
+    from .models import _LAMA_LOAD_LOCK, _lama_model_for_device, run_torch_cuda_on_pinned_thread
 
     ph, pw = padded_mask.shape
     accum = np.zeros((ph, pw, 3), dtype=np.float32)
@@ -1044,65 +1044,72 @@ def _run_lama_tiles(
         finally:
             del img_t, mask_t
 
-    with (_lama_inference_lock if device == "cuda" else contextlib.nullcontext()):
-        use_fp16 = _lama_supports_fp16(net, device)
-        with torch.inference_mode():
-            for start in range(0, len(active_tiles), batch_size):
-                batch_coords = active_tiles[start:start + batch_size]
-                img_batch = np.stack(
-                    [padded_rgb[y:y + th, x:x + tw].transpose(2, 0, 1) for y, x in batch_coords],
-                    axis=0,
-                ).astype(np.float32) / np.float32(255.0)
-                mask_batch = np.stack(
-                    [padded_mask[y:y + th, x:x + tw][None] for y, x in batch_coords],
-                    axis=0,
-                ).astype(np.float32)
-                pred_np: np.ndarray | None = None
-                cuda_err: str | None = None
-                try:
-                    pred_np = _infer_batch(net, device, img_batch, mask_batch, use_fp16)
-                except Exception as exc:
-                    if device != "cuda":
-                        raise
-                    cuda_err = str(exc)
+    def _run_all_tiles() -> None:
+        nonlocal cpu_fallback
+        with (_lama_inference_lock if device == "cuda" else contextlib.nullcontext()):
+            use_fp16 = _lama_supports_fp16(net, device)
+            with torch.inference_mode():
+                for start in range(0, len(active_tiles), batch_size):
+                    batch_coords = active_tiles[start:start + batch_size]
+                    img_batch = np.stack(
+                        [padded_rgb[y:y + th, x:x + tw].transpose(2, 0, 1) for y, x in batch_coords],
+                        axis=0,
+                    ).astype(np.float32) / np.float32(255.0)
+                    mask_batch = np.stack(
+                        [padded_mask[y:y + th, x:x + tw][None] for y, x in batch_coords],
+                        axis=0,
+                    ).astype(np.float32)
+                    pred_np: np.ndarray | None = None
+                    cuda_err: str | None = None
+                    try:
+                        pred_np = _infer_batch(net, device, img_batch, mask_batch, use_fp16)
+                    except Exception as exc:
+                        if device != "cuda":
+                            raise
+                        cuda_err = str(exc)
 
-                if cuda_err is not None:
-                    # Exit the except frame before retrying so traceback references to
-                    # failed CUDA input/scratch tensors are completely released.
-                    logging.getLogger("uvicorn.error").warning(
-                        "LaMa CUDA inference failed (%s); clearing cache and falling back", cuda_err
-                    )
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                    if cuda_err is not None:
+                        # Exit the except frame before retrying so traceback references to
+                        # failed CUDA input/scratch tensors are completely released.
+                        logging.getLogger("uvicorn.error").warning(
+                            "LaMa CUDA inference failed (%s); clearing cache and falling back", cuda_err
+                        )
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
 
-                    tile_preds = []
-                    for i_tile in range(len(batch_coords)):
-                        im1 = img_batch[i_tile:i_tile + 1]
-                        mk1 = mask_batch[i_tile:i_tile + 1]
-                        tile_pred: np.ndarray | None = None
-                        need_cpu = (len(batch_coords) == 1) and (not use_fp16)
-                        if not need_cpu:
-                            try:
-                                tile_pred = _infer_batch(net, device, im1, mk1, False)[0]
-                            except Exception:
-                                need_cpu = True
-                        if need_cpu:
-                            gc.collect()
-                            if torch.cuda.is_available():
-                                torch.cuda.empty_cache()
-                            if cpu_fallback is None:
-                                with _LAMA_LOAD_LOCK:
-                                    cpu_fallback = _lama_model_for_device("cpu")
-                            cpu_net, cpu_dev = cpu_fallback
-                            tile_pred = _infer_batch(cpu_net, cpu_dev, im1, mk1, False)[0]
-                        tile_preds.append(tile_pred)
-                    pred_np = np.stack(tile_preds, axis=0)
-                for idx_b, (y, x) in enumerate(batch_coords):
-                    accum[y:y + th, x:x + tw] += pred_np[idx_b] * window[:, :, None]
-                    weights[y:y + th, x:x + tw] += window
-        if device == "cuda" and torch.cuda.is_available():
-            torch.cuda.empty_cache()
+                        tile_preds = []
+                        for i_tile in range(len(batch_coords)):
+                            im1 = img_batch[i_tile:i_tile + 1]
+                            mk1 = mask_batch[i_tile:i_tile + 1]
+                            tile_pred: np.ndarray | None = None
+                            need_cpu = (len(batch_coords) == 1) and (not use_fp16)
+                            if not need_cpu:
+                                try:
+                                    tile_pred = _infer_batch(net, device, im1, mk1, False)[0]
+                                except Exception:
+                                    need_cpu = True
+                            if need_cpu:
+                                gc.collect()
+                                if torch.cuda.is_available():
+                                    torch.cuda.empty_cache()
+                                if cpu_fallback is None:
+                                    with _LAMA_LOAD_LOCK:
+                                        cpu_fallback = _lama_model_for_device("cpu")
+                                cpu_net, cpu_dev = cpu_fallback
+                                tile_pred = _infer_batch(cpu_net, cpu_dev, im1, mk1, False)[0]
+                            tile_preds.append(tile_pred)
+                        pred_np = np.stack(tile_preds, axis=0)
+                    for idx_b, (y, x) in enumerate(batch_coords):
+                        accum[y:y + th, x:x + tw] += pred_np[idx_b] * window[:, :, None]
+                        weights[y:y + th, x:x + tw] += window
+            if device == "cuda" and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    if device == "cuda":
+        run_torch_cuda_on_pinned_thread(_run_all_tiles)
+    else:
+        _run_all_tiles()
     return accum, weights
 
 

@@ -119,6 +119,7 @@ def ort_provider_specs(providers: Sequence[str]) -> list:
                     "CUDAExecutionProvider",
                     {
                         "device_id": 0,
+                        "gpu_mem_limit": 2 * 1024 * 1024 * 1024,
                         "arena_extend_strategy": "kSameAsRequested",
                         "cudnn_conv_algo_search": "HEURISTIC",
                         "do_copy_in_default_stream": True,
@@ -131,6 +132,7 @@ def ort_provider_specs(providers: Sequence[str]) -> list:
 
 
 _ORT_PINNED_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="prism-ort")
+_TORCH_CUDA_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="prism-cuda")
 _T = TypeVar("_T")
 
 
@@ -139,6 +141,12 @@ def run_ort_on_pinned_thread(fn: Callable[[], _T]) -> _T:
     reuses one PerThreadContext/cublasHandle_t instead of leaking per-thread cuBLAS handles
     across FastAPI's worker threadpool."""
     return _ORT_PINNED_EXECUTOR.submit(fn).result()
+
+
+def run_torch_cuda_on_pinned_thread(fn: Callable[[], _T]) -> _T:
+    """Execute PyTorch CUDA inference on a single pinned OS thread so cuFFT/cuBLAS/cuDNN
+    handles and plan caches are never duplicated across FastAPI's 40-thread worker pool."""
+    return _TORCH_CUDA_EXECUTOR.submit(fn).result()
 
 
 def create_ort_session(model_file: str | Path, providers: Sequence[str] | None = None):
@@ -174,10 +182,11 @@ def _lama_model_for_device(device: str):
 
     torch.set_num_threads(inference_threads())
     if device == "cuda":
-        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.allow_tf32 = False
         torch.backends.cuda.matmul.allow_tf32 = False
         try:
+            torch.backends.cuda.cufft_plan_cache.max_size = 4
             torch._C._jit_set_profiling_mode(False)
         except Exception:
             pass
@@ -280,11 +289,16 @@ def _do_warmup() -> None:
             from .learned import _lama_inference_lock
 
             net, device = lama_model()
-            dummy_img = torch.zeros((1, 3, 512, 512), dtype=torch.float32, device=device)
-            dummy_mask = torch.zeros((1, 1, 512, 512), dtype=torch.float32, device=device)
-            with (_lama_inference_lock if device == "cuda" else contextlib.nullcontext()):
-                with torch.inference_mode():
-                    _ = net(dummy_img, dummy_mask)
+            def _warm_lama() -> None:
+                dummy_img = torch.zeros((1, 3, 512, 512), dtype=torch.float32, device=device)
+                dummy_mask = torch.zeros((1, 1, 512, 512), dtype=torch.float32, device=device)
+                with (_lama_inference_lock if device == "cuda" else contextlib.nullcontext()):
+                    with torch.inference_mode():
+                        _ = net(dummy_img, dummy_mask)
+            if device == "cuda":
+                run_torch_cuda_on_pinned_thread(_warm_lama)
+            else:
+                _warm_lama()
             logger.info("warmup: native FFT LaMa (%s) ready on %s", lama_file.name, device)
     except Exception as exc:
         logger.debug("warmup: lama skipped (%s)", exc)
