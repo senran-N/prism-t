@@ -1005,6 +1005,7 @@ def detect_and_recognize_page_regions(
     use_ja_detector_mode = bool((not recognize_text or (default_vertical and mocr is not None)) and ocr is not None and hasattr(ocr, "text_det"))
 
     raw_boxes: list[tuple[np.ndarray, str, float]] = []
+    suppressed_lines: list[np.ndarray] = []
 
     if detected_lines is not None:
         if text_probability is not None:
@@ -1015,6 +1016,32 @@ def detect_and_recognize_page_regions(
             if text_probability is not None:
                 independent=split_disconnected_text_tracks(independent,text_probability)
             detected_lines = fuse_text_line_geometry(detected_lines,independent,text_probability)
+        if (not recognize_text) and text_probability is not None and len(detected_lines) > 1:
+            page_cut_det, _ = otsu_threshold_and_eta(text_probability)
+            min_page_dim = float(min(H, W))
+            filtered_lines = []
+            for p in detected_lines:
+                px, py, pw, ph = cv2.boundingRect(np.rint(p).astype(np.int32))
+                min_d = float(min(pw, ph))
+                max_d = float(max(pw, ph))
+                if min_d >= 0.10 * min_page_dim and (max_d / max(min_d, 1.0)) < 1.8:
+                    mx0, my0 = max(0, px), max(0, py)
+                    mx1, my1 = min(W, px + pw), min(H, py + ph)
+                    if mx1 > mx0 and my1 > my0:
+                        pm = np.zeros((my1 - my0, mx1 - mx0), dtype=np.uint8)
+                        cv2.fillPoly(pm, [np.rint(p - np.array([[mx0, my0]], dtype=np.float32)).astype(np.int32)], 1)
+                        pv = text_probability[my0:my1, mx0:mx1][pm > 0]
+                        if (
+                            pv.size >= 16
+                            and float(np.quantile(pv, 0.90)) < 0.90
+                            and float(np.mean(pv)) < 0.28
+                            and float(np.mean(pv > page_cut_det)) < 0.25
+                        ):
+                            suppressed_lines.append(p)
+                            continue
+                filtered_lines.append(p)
+            if filtered_lines:
+                detected_lines = filtered_lines
         raw_boxes = [(p, "", 0.0) for p in detected_lines]
         if recognize_text and ocr is not None:
             # Keep independent page OCR evidence: a shrunken DB contour can
@@ -1115,11 +1142,12 @@ def detect_and_recognize_page_regions(
 
     if text_probability is not None:
         from .learned import missing_text_polygons
-        accounted = [b[0] for b in raw_boxes]
+        known_polys = [b[0] for b in raw_boxes]
+        accounted = known_polys + suppressed_lines
         missing = []
         page_cut, _ = otsu_threshold_and_eta(text_probability)
         known_lines = np.zeros((H,W),np.uint8)
-        for poly in accounted:
+        for poly in known_polys:
             cv2.fillPoly(known_lines,[np.rint(poly).astype(np.int32)],1)
         known_ink = text_probability[(known_lines > 0) & (text_probability > page_cut)]
         evidence_floor = float(np.quantile(known_ink,.25)) if known_ink.size else None
